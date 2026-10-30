@@ -1,4 +1,7 @@
-"""Telegram long-polling gateway and Bouncer + Interviewer + Converter update orchestrator."""
+"""Telegram long-polling gateway and Bouncer + Interviewer + Converter + Scripter orchestrator.
+
+Routes incoming updates through the vision gate, interview, converter, and scripter stages.
+"""
 
 from telegram_documentaries.bouncer import DEFAULT_REJECTION_MESSAGE, Bouncer, BouncerError
 from telegram_documentaries.converter import Converter, ConverterError
@@ -16,6 +19,7 @@ from telegram_documentaries.models import (
     TelegramPhotoSize,
     TelegramUpdate,
 )
+from telegram_documentaries.scripter import Scripter, ScripterError
 from telegram_documentaries.session import SessionPhase, SessionStore
 from telegram_documentaries.telegram_client import TelegramClient, TelegramClientError
 
@@ -30,6 +34,10 @@ INTERVIEW_ERROR_FALLBACK_MESSAGE = (
 CONVERTER_ERROR_FALLBACK_MESSAGE = (
     "My darkroom chemicals fizzled out — send any message to retry developing your portrait, "
     "or /restart to begin anew!"
+)
+SCRIPTER_ERROR_FALLBACK_MESSAGE = (
+    "My typewriter ribbon snapped mid-narration — send any message to retry your "
+    "documentary script, or /restart to begin anew!"
 )
 INTERVIEW_COMPLETE_NUDGE = (
     "Field research is already wrapped up, mate! Send /restart if you'd like to begin a "
@@ -83,6 +91,46 @@ def _generate_hybrid_portrait(
     return converter.generate_hybrid_portrait(portrait, dossier)
 
 
+@log_stage("scripter")
+def _generate_script(
+    scripter: Scripter,
+    dossier: BehavioralDossier,
+    chat_id: int,
+) -> str:
+    """Run Scripter.generate_script with chat_id context for structured logging."""
+    return scripter.generate_script(dossier)
+
+
+def _deliver_script(
+    chat_id: int,
+    dossier: BehavioralDossier,
+    client: TelegramClient,
+    sessions: SessionStore,
+    scripter: Scripter,
+) -> None:
+    """Generate and send the documentary narration script, or send fallback preserving portrait."""
+    try:
+        script = _generate_script(scripter=scripter, dossier=dossier, chat_id=chat_id)
+        client.send_message(chat_id=chat_id, text=script)
+    except (ScripterError, TelegramClientError) as exc:
+        logger.exception(
+            "event=scripter_failed stage=gateway chat_id=%s error=%s",
+            chat_id,
+            exc,
+        )
+        try:
+            client.send_message(chat_id=chat_id, text=SCRIPTER_ERROR_FALLBACK_MESSAGE)
+        except TelegramClientError as fallback_exc:
+            logger.exception(
+                "event=scripter_fallback_failed stage=gateway chat_id=%s error=%s",
+                chat_id,
+                fallback_exc,
+            )
+        return
+
+    sessions.set_script(chat_id=chat_id, script=script)
+
+
 def _deliver_hybrid_portrait(
     chat_id: int,
     portrait: bytes,
@@ -90,8 +138,9 @@ def _deliver_hybrid_portrait(
     client: TelegramClient,
     sessions: SessionStore,
     converter: Converter,
+    scripter: Scripter,
 ) -> None:
-    """Synthesize and send the hybrid animal portrait, or send fallback preserving state."""
+    """Synthesize and send the hybrid animal portrait, then deliver the narration script."""
     try:
         hybrid_bytes = _generate_hybrid_portrait(
             converter=converter,
@@ -110,6 +159,13 @@ def _deliver_hybrid_portrait(
         return
 
     sessions.set_hybrid_portrait(chat_id=chat_id, hybrid_portrait=hybrid_bytes)
+    _deliver_script(
+        chat_id=chat_id,
+        dossier=dossier,
+        client=client,
+        sessions=sessions,
+        scripter=scripter,
+    )
 
 
 def _handle_photo(
@@ -184,6 +240,7 @@ def _handle_interview_text(
     sessions: SessionStore,
     interviewer: Interviewer,
     converter: Converter,
+    scripter: Scripter,
 ) -> None:
     """Process one user text reply during the INTERVIEWING phase."""
     state = sessions.get(chat_id)
@@ -231,6 +288,7 @@ def _handle_interview_text(
             client=client,
             sessions=sessions,
             converter=converter,
+            scripter=scripter,
         )
         return
 
@@ -247,8 +305,9 @@ def _handle_generating_media_text(
     client: TelegramClient,
     sessions: SessionStore,
     converter: Converter,
+    scripter: Scripter,
 ) -> None:
-    """Retry Converter delivery if hybrid_portrait is missing, otherwise nudge to /restart."""
+    """Handle retries in GENERATING_MEDIA based on whether portrait/script are present."""
     state = sessions.get(chat_id)
     if state.hybrid_portrait is None and state.portrait is not None and state.dossier is not None:
         _deliver_hybrid_portrait(
@@ -258,6 +317,17 @@ def _handle_generating_media_text(
             client=client,
             sessions=sessions,
             converter=converter,
+            scripter=scripter,
+        )
+        return
+
+    if state.hybrid_portrait is not None and state.script is None and state.dossier is not None:
+        _deliver_script(
+            chat_id=chat_id,
+            dossier=state.dossier,
+            client=client,
+            sessions=sessions,
+            scripter=scripter,
         )
         return
 
@@ -272,6 +342,7 @@ def process_update(
     bouncer: Bouncer,
     interviewer: Interviewer,
     converter: Converter,
+    scripter: Scripter,
 ) -> None:
     """Route one incoming Telegram update through the vision gate and interview state machine."""
     message = update.message
@@ -311,6 +382,7 @@ def process_update(
                 sessions=sessions,
                 interviewer=interviewer,
                 converter=converter,
+                scripter=scripter,
             )
         else:
             _handle_generating_media_text(
@@ -318,6 +390,7 @@ def process_update(
                 client=client,
                 sessions=sessions,
                 converter=converter,
+                scripter=scripter,
             )
         return
 
@@ -334,6 +407,7 @@ def poll_once(
     bouncer: Bouncer,
     interviewer: Interviewer,
     converter: Converter,
+    scripter: Scripter,
     offset: int | None = None,
     timeout: int = 30,
 ) -> int | None:
@@ -358,6 +432,7 @@ def poll_once(
                 bouncer=bouncer,
                 interviewer=interviewer,
                 converter=converter,
+                scripter=scripter,
             )
         except Exception as exc:
             logger.exception(
@@ -375,6 +450,7 @@ def run_polling_loop(
     bouncer: Bouncer,
     interviewer: Interviewer,
     converter: Converter,
+    scripter: Scripter,
     timeout: int = 30,
     max_iterations: int | None = None,
 ) -> None:
@@ -389,6 +465,7 @@ def run_polling_loop(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=scripter,
             offset=offset,
             timeout=timeout,
         )

@@ -2,12 +2,13 @@
 
 An interactive Telegram bot powered by Google Agent Development Kit (ADK) and Gemini multimodal models. A user uploads a portrait photo, answers a brief 5–7 question behavioral interview, and receives a customized hybrid wildlife portrait along with a dramatic, British-style nature documentary narration delivered as both text and a synthesized voice note.
 
-## Current Status (Phase 4)
+## Current Status (Phase 5)
 
 - **Phase 1 (Completed):** Repository skeleton, strict Pydantic v2 boundary models, decorator-based structured logging (`@log_stage`), pre-commit quality/security hooks, and the Telegram Bot API long-polling gateway entrypoint.
 - **Phase 2 (Completed):** The Bouncer vision gate (`google-genai` + `gemini-3.1-flash-lite-preview`) inspects uploaded photos for a human subject, admits human portraits to the session, and rejects non-human photos with a cheeky in-character message. Per-`chat_id` session state lives in memory.
 - **Phase 3 (Completed):** The Interviewer & stateful orchestrator (`Interviewer` + `gemini-3.1-flash-lite-preview`) conducts a sequential 5–7 question behavioral interview one question at a time per `chat_id`, enforces turn bounds, compiles a validated `BehavioralDossier` (`summary` + `suggested_animal`), and transitions the session to `GENERATING_MEDIA`.
 - **Phase 4 (Completed):** The Converter multimodal image agent (`Converter` + `gemini-3.1-flash-image-preview`) fuses the user's original portrait bytes and compiled `BehavioralDossier` in a single multimodal call (no intermediate text-only image description hop), validates the generated image via `GeneratedImage`, stores `hybrid_portrait` in `SessionState`, and delivers the hybrid animal portrait directly to the user's Telegram chat via `TelegramClient.send_photo`.
+- **Phase 5 (Completed):** The Scripter narrator agent (`Scripter` + `gemini-3.1-flash-lite-preview`) transforms the compiled `BehavioralDossier` into a strict single-paragraph British wildlife documentary narration script (~60–90 words) validated via `DocumentaryScript`, stores `script` in `SessionState`, delivers the narration text to the Telegram chat via `send_message`, and supports resilient retry handling (`SCRIPTER_ERROR_FALLBACK_MESSAGE`).
 
 ## Project Structure
 
@@ -31,7 +32,7 @@ An interactive Telegram bot powered by Google Agent Development Kit (ADK) and Ge
 │       ├── converter.py                 # Gemini multimodal hybrid animal portrait synthesizer
 │       ├── poller.py                    # Resilient polling cycle and Bouncer + Interviewer + Converter router
 │       └── main.py                      # CLI entrypoint
-└── tests/                               # Unit and boundary tests (174 tests)
+└── tests/                               # Unit and boundary tests (208 tests)
 ```
 
 ## Setup & Configuration
@@ -83,11 +84,12 @@ When started, the bot logs `Telegram polling loop started...`, long-polls `getUp
   - Turn bounds (`MIN_INTERVIEW_QUESTIONS = 5`, `MAX_INTERVIEW_QUESTIONS = 7`) are strictly enforced: the interview never completes with fewer than 5 answers and always completes by the 7th answer at the latest.
   - While `is_complete=False`, `SessionStore.record_answer` appends the `InterviewTurn`, updates `current_question`, and sends the single `next_question` (`event=interviewer_question stage=interviewer turn=...`).
   - When `is_complete=True` (after 5–7 answers), `SessionStore.complete_interview` records the final turn, stores the validated `BehavioralDossier` (`summary` + `suggested_animal`), and transitions the session to `GENERATING_MEDIA` (`event=interviewer_dossier stage=interviewer turns=... suggested_animal=...`).
-  - Immediately upon entering `GENERATING_MEDIA`, `Converter.generate_hybrid_portrait` passes both the original portrait bytes and the `BehavioralDossier` in a single multimodal call to `gemini-3.1-flash-image-preview` (`event=converter_portrait_generated stage=converter suggested_animal=... mime_type=... bytes=...`), `TelegramClient.send_photo` delivers the synthesized hybrid animal portrait to the chat, and `SessionStore.set_hybrid_portrait` stores the image bytes.
+  - Immediately upon entering `GENERATING_MEDIA`, `Converter.generate_hybrid_portrait` passes both the original portrait bytes and the `BehavioralDossier` in a single multimodal call to `gemini-3.1-flash-image-preview` (`event=converter_portrait_generated stage=converter suggested_animal=... mime_type=... bytes=...`), `TelegramClient.send_photo` delivers the synthesized hybrid animal portrait to the chat, and `SessionStore.set_hybrid_portrait` stores the image bytes. Immediately following hybrid portrait delivery, `Scripter.generate_script` invokes `gemini-3.1-flash-lite-preview` (`response_schema=DocumentaryScript`, `event=scripter_narration_generated stage=scripter`) to produce the single-paragraph (~60–90 words) British wildlife documentary narration, `TelegramClient.send_message` delivers it to the chat, and `SessionStore.set_script` stores the script.
 - **Text while `GENERATING_MEDIA`:**
   - If `hybrid_portrait is None` (after a previous Converter or `sendPhoto` failure), sending any non-command text retries `Converter.generate_hybrid_portrait` and `TelegramClient.send_photo` using the preserved `portrait` and `dossier`.
-  - Once `hybrid_portrait` has been delivered, replies with `INTERVIEW_COMPLETE_NUDGE` letting the user know field research is complete and offering `/restart`.
-- **`/start` or `/restart` in any phase:** Resets the chat's session back to `AWAITING_PHOTO` (clearing `portrait`, `current_question`, `interview_history`, `dossier`, and `hybrid_portrait`) and sends `AWAITING_PHOTO_NUDGE`.
+  - If `hybrid_portrait` is present but `script is None` (after a previous Scripter failure), sending any non-command text retries **only** `Scripter.generate_script` and script delivery without re-running the Converter.
+  - Once both `hybrid_portrait` and `script` have been delivered, replies with `INTERVIEW_COMPLETE_NUDGE` letting the user know field research is complete and offering `/restart`.
+- **`/start` or `/restart` in any phase:** Resets the chat's session back to `AWAITING_PHOTO` (clearing `portrait`, `current_question`, `interview_history`, `dossier`, `hybrid_portrait`, and `script`) and sends `AWAITING_PHOTO_NUDGE`.
 - **Error Resilience:**
   - Photo download, Bouncer, or Question 1 failures reply with `ERROR_FALLBACK_MESSAGE` (`"My binoculars fogged up — send that photo again?"`) and ensure the chat is never stranded in `INTERVIEWING` without a `current_question`.
   - Mid-interview Gemini failures reply with `INTERVIEW_ERROR_FALLBACK_MESSAGE` (`"My field notebook got rained on — could you repeat that answer, mate?"`) while preserving `interview_history` and `current_question` so the user can retry their answer.

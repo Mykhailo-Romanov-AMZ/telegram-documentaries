@@ -1,7 +1,7 @@
 """Tests for the Telegram long-polling loop, Bouncer vision gate, and Interviewer orchestration."""
 
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
@@ -29,16 +29,22 @@ from telegram_documentaries.poller import (
     ERROR_FALLBACK_MESSAGE,
     INTERVIEW_COMPLETE_NUDGE,
     INTERVIEW_ERROR_FALLBACK_MESSAGE,
+    SCRIPTER_ERROR_FALLBACK_MESSAGE,
     poll_once,
     process_update,
     run_polling_loop,
 )
+from telegram_documentaries.scripter import Scripter, ScripterError
 from telegram_documentaries.session import SessionPhase, SessionStore
 from telegram_documentaries.telegram_client import TelegramClient, TelegramClientError
 
 PORTRAIT_BYTES = b"\xff\xd8large-portrait-bytes"
 HYBRID_PORTRAIT_BYTES = b"\x89PNG\r\n\x1a\nhybrid-animal-portrait"
 FIRST_QUESTION = "When you emerge from your burrow each morning, what is your first ritual?"
+SAMPLE_SCRIPT = (
+    "Here in the midnight kitchen, the solitary Eurasian Badger emerges from its duvet burrow "
+    "to guard the biscuit tin with theatrical devotion."
+)
 
 
 def _photo_update(chat_id: int, update_id: int = 100) -> TelegramUpdate:
@@ -107,6 +113,29 @@ def _ready_converter(hybrid_bytes: bytes = HYBRID_PORTRAIT_BYTES) -> MagicMock:
     return converter
 
 
+def _ready_scripter(script_text: str = SAMPLE_SCRIPT) -> MagicMock:
+    scripter = MagicMock(spec=Scripter)
+    scripter.generate_script.return_value = script_text
+    return scripter
+
+
+def _completed_media_state(
+    *,
+    with_hybrid_portrait: bool,
+) -> tuple[SessionStore, BehavioralDossier]:
+    """Build a GENERATING_MEDIA session with a completed dossier and optional portrait."""
+    dossier = BehavioralDossier(
+        summary="Completed dossier awaiting retry.",
+        suggested_animal="Red Panda",
+    )
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
+    if with_hybrid_portrait:
+        sessions.set_hybrid_portrait(chat_id=111, hybrid_portrait=HYBRID_PORTRAIT_BYTES)
+    return sessions, dossier
+
+
 def _client_with_portrait() -> MagicMock:
     client = MagicMock(spec=TelegramClient)
     client.get_file.return_value = TelegramFile(
@@ -132,6 +161,7 @@ def test_human_photo_downloads_largest_size_starts_interview_and_sends_question_
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     client.get_file.assert_called_once_with("large")
@@ -165,6 +195,7 @@ def test_interviewer_error_on_question_1_resets_session_and_sends_error_fallback
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_called_once_with(chat_id=98765, text=ERROR_FALLBACK_MESSAGE)
@@ -199,6 +230,7 @@ def test_non_human_photo_sends_cheeky_rejection_and_resets_session(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     interviewer.start_interview.assert_not_called()
@@ -233,6 +265,7 @@ def test_non_human_photo_with_empty_rejection_uses_local_fallback(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_called_once_with(chat_id=98765, text=DEFAULT_REJECTION_MESSAGE)
@@ -258,6 +291,7 @@ def test_text_while_awaiting_photo_sends_nudge_and_leaves_phase_unchanged() -> N
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     client.send_message.assert_called_once_with(chat_id=111, text=AWAITING_PHOTO_NUDGE)
@@ -293,6 +327,7 @@ def test_text_while_interviewing_advances_turn_records_answer_and_sends_next_que
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     interviewer.advance_interview.assert_called_once_with(
@@ -310,12 +345,13 @@ def test_text_while_interviewing_advances_turn_records_answer_and_sends_next_que
     ]
 
 
-def test_text_while_interviewing_final_turn_completes_interview_and_sends_hybrid_portrait() -> None:
-    """When advance_interview completes, generates hybrid portrait, stores it, and sends photo."""
+def test_final_turn_sends_hybrid_portrait_then_delivers_script() -> None:
+    """When advance_interview completes, deliver the hybrid portrait then the script."""
     client = MagicMock(spec=TelegramClient)
     bouncer = MagicMock(spec=Bouncer)
     interviewer = MagicMock(spec=Interviewer)
     converter = _ready_converter()
+    scripter = _ready_scripter()
     dossier = BehavioralDossier(
         summary="A tea-obsessed nocturnal burrower who guards the biscuit tin.",
         suggested_animal="Eurasian Badger",
@@ -337,6 +373,7 @@ def test_text_while_interviewing_final_turn_completes_interview_and_sends_hybrid
         bouncer=bouncer,
         interviewer=interviewer,
         converter=converter,
+        scripter=scripter,
     )
 
     state = sessions.get(chat_id=111)
@@ -344,6 +381,7 @@ def test_text_while_interviewing_final_turn_completes_interview_and_sends_hybrid
     assert state.current_question is None
     assert state.dossier == dossier
     assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script == SAMPLE_SCRIPT
     assert len(state.interview_history) == 5
 
     converter.generate_hybrid_portrait.assert_called_once_with(
@@ -354,18 +392,67 @@ def test_text_while_interviewing_final_turn_completes_interview_and_sends_hybrid
         chat_id=111,
         photo_bytes=HYBRID_PORTRAIT_BYTES,
     )
-    client.send_message.assert_not_called()
+    scripter.generate_script.assert_called_once_with(dossier)
+    client.send_message.assert_called_once_with(
+        chat_id=111,
+        text=SAMPLE_SCRIPT,
+    )
+
+
+def test_final_turn_sends_hybrid_photo_before_script_as_separate_messages() -> None:
+    """Hybrid sendPhoto precedes the narration, which is delivered as its own sendMessage."""
+    client = MagicMock(spec=TelegramClient)
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = _ready_scripter()
+    dossier = BehavioralDossier(
+        summary="A tea-obsessed nocturnal burrower who guards the biscuit tin.",
+        suggested_animal="Eurasian Badger",
+    )
+    interviewer.advance_interview.return_value = InterviewerTurnResult(
+        is_complete=True,
+        next_question="",
+        dossier=dossier,
+    )
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    for idx in range(1, 5):
+        sessions.record_answer(chat_id=111, answer=f"A{idx}", next_question=f"Q{idx + 1}?")
+
+    process_update(
+        update=_text_update(chat_id=111, text="Final answer 5"),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+    )
+
+    delivery_calls = [
+        mock_call[0]
+        for mock_call in client.mock_calls
+        if mock_call[0] in {"send_photo", "send_message"}
+    ]
+    assert delivery_calls == ["send_photo", "send_message"]
+    client.send_photo.assert_called_once_with(
+        chat_id=111,
+        photo_bytes=HYBRID_PORTRAIT_BYTES,
+    )
+    client.send_message.assert_called_once_with(chat_id=111, text=SAMPLE_SCRIPT)
 
 
 def test_converter_error_on_final_turn_logs_sends_fallback_and_preserves_dossier_for_retry(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """If Converter fails after final answer, logs event=converter_failed and keeps dossier."""
+    """If Converter fails after final answer, logs event=converter_failed and skips Scripter."""
     client = MagicMock(spec=TelegramClient)
     bouncer = MagicMock(spec=Bouncer)
     interviewer = MagicMock(spec=Interviewer)
     converter = MagicMock(spec=Converter)
     converter.generate_hybrid_portrait.side_effect = ConverterError("darkroom exploded")
+    scripter = _ready_scripter()
     dossier = BehavioralDossier(
         summary="A tea-obsessed nocturnal burrower who guards the biscuit tin.",
         suggested_animal="Eurasian Badger",
@@ -386,9 +473,11 @@ def test_converter_error_on_final_turn_logs_sends_fallback_and_preserves_dossier
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=scripter,
         )
 
     client.send_photo.assert_not_called()
+    scripter.generate_script.assert_not_called()
     client.send_message.assert_called_once_with(
         chat_id=111,
         text=CONVERTER_ERROR_FALLBACK_MESSAGE,
@@ -405,17 +494,19 @@ def test_converter_error_on_final_turn_logs_sends_fallback_and_preserves_dossier
     assert state.portrait == PORTRAIT_BYTES
     assert state.dossier == dossier
     assert state.hybrid_portrait is None
+    assert state.script is None
 
 
 def test_send_photo_error_on_final_turn_logs_sends_fallback_and_leaves_hybrid_portrait_none(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """If send_photo fails, logs event=converter_failed and keeps hybrid_portrait None for retry."""
+    """If send_photo fails, logs event=converter_failed, skips Scripter, and keeps state None."""
     client = MagicMock(spec=TelegramClient)
     client.send_photo.side_effect = TelegramClientError("sendPhoto failed")
     bouncer = MagicMock(spec=Bouncer)
     interviewer = MagicMock(spec=Interviewer)
     converter = _ready_converter()
+    scripter = _ready_scripter()
     dossier = BehavioralDossier(
         summary="A tea-obsessed nocturnal burrower.",
         suggested_animal="Eurasian Badger",
@@ -436,8 +527,10 @@ def test_send_photo_error_on_final_turn_logs_sends_fallback_and_leaves_hybrid_po
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=scripter,
         )
 
+    scripter.generate_script.assert_not_called()
     client.send_message.assert_called_once_with(
         chat_id=111,
         text=CONVERTER_ERROR_FALLBACK_MESSAGE,
@@ -454,14 +547,159 @@ def test_send_photo_error_on_final_turn_logs_sends_fallback_and_leaves_hybrid_po
     assert state.portrait == PORTRAIT_BYTES
     assert state.dossier == dossier
     assert state.hybrid_portrait is None
+    assert state.script is None
 
 
-def test_text_during_generating_media_retries_converter_when_hybrid_portrait_is_none() -> None:
-    """Text in GENERATING_MEDIA when hybrid_portrait is None retries Converter and send_photo."""
+def test_scripter_error_after_converter_success_preserves_hybrid_portrait_and_sends_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If Scripter fails after Converter succeeds, log event=scripter_failed and keep portrait."""
     client = MagicMock(spec=TelegramClient)
     bouncer = MagicMock(spec=Bouncer)
     interviewer = MagicMock(spec=Interviewer)
     converter = _ready_converter()
+    scripter = MagicMock(spec=Scripter)
+    scripter.generate_script.side_effect = ScripterError("typewriter jammed")
+    dossier = BehavioralDossier(
+        summary="A tea-obsessed nocturnal burrower.",
+        suggested_animal="Eurasian Badger",
+    )
+    interviewer.advance_interview.return_value = InterviewerTurnResult(
+        is_complete=True,
+        next_question="",
+        dossier=dossier,
+    )
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_text_update(chat_id=111, text="Final answer"),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+        )
+
+    client.send_photo.assert_called_once_with(chat_id=111, photo_bytes=HYBRID_PORTRAIT_BYTES)
+    scripter.generate_script.assert_called_once_with(dossier)
+    client.send_message.assert_called_once_with(
+        chat_id=111,
+        text=SCRIPTER_ERROR_FALLBACK_MESSAGE,
+    )
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        "event=scripter_failed stage=gateway chat_id=111" in r.getMessage()
+        and r.exc_info is not None
+        for r in error_records
+    )
+
+    state = sessions.get(chat_id=111)
+    assert state.phase == SessionPhase.GENERATING_MEDIA
+    assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script is None
+
+
+def test_script_send_message_error_logs_scripter_failed_and_leaves_script_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If sending the narration script fails, log event=scripter_failed and leave script None."""
+    client = MagicMock(spec=TelegramClient)
+    client.send_message.side_effect = [
+        TelegramClientError("sendMessage failed for script"),
+        MagicMock(spec=TelegramMessage),
+    ]
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = _ready_scripter()
+    dossier = BehavioralDossier(
+        summary="A tea-obsessed nocturnal burrower.",
+        suggested_animal="Eurasian Badger",
+    )
+    interviewer.advance_interview.return_value = InterviewerTurnResult(
+        is_complete=True,
+        next_question="",
+        dossier=dossier,
+    )
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_text_update(chat_id=111, text="Final answer"),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+        )
+
+    assert client.send_message.call_count == 2
+    client.send_message.assert_any_call(chat_id=111, text=SAMPLE_SCRIPT)
+    client.send_message.assert_any_call(chat_id=111, text=SCRIPTER_ERROR_FALLBACK_MESSAGE)
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        "event=scripter_failed stage=gateway chat_id=111" in r.getMessage()
+        and r.exc_info is not None
+        for r in error_records
+    )
+
+    state = sessions.get(chat_id=111)
+    assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script is None
+
+
+def test_script_send_failure_does_not_store_script() -> None:
+    """A failed narration send must not call sessions.set_script and leaves script None."""
+    client = MagicMock(spec=TelegramClient)
+    client.send_message.side_effect = [
+        TelegramClientError("sendMessage failed for script"),
+        MagicMock(spec=TelegramMessage),
+    ]
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = _ready_scripter()
+    dossier = BehavioralDossier(
+        summary="A tea-obsessed nocturnal burrower.",
+        suggested_animal="Eurasian Badger",
+    )
+    interviewer.advance_interview.return_value = InterviewerTurnResult(
+        is_complete=True,
+        next_question="",
+        dossier=dossier,
+    )
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+
+    with patch.object(sessions, "set_script") as set_script:
+        process_update(
+            update=_text_update(chat_id=111, text="Final answer"),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+        )
+
+    set_script.assert_not_called()
+    state = sessions.get(chat_id=111)
+    assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script is None
+
+
+def test_generating_media_retries_converter_then_scripter_when_portrait_missing() -> None:
+    """Text in GENERATING_MEDIA with no hybrid portrait retries Converter then Scripter."""
+    client = MagicMock(spec=TelegramClient)
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = _ready_scripter()
     dossier = BehavioralDossier(
         summary="Completed dossier awaiting retry.",
         suggested_animal="Red Panda",
@@ -470,6 +708,7 @@ def test_text_during_generating_media_retries_converter_when_hybrid_portrait_is_
     sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
     sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
     assert sessions.get(chat_id=111).hybrid_portrait is None
+    assert sessions.get(chat_id=111).script is None
 
     process_update(
         update=_text_update(chat_id=111, text="Please retry my portrait!"),
@@ -478,23 +717,141 @@ def test_text_during_generating_media_retries_converter_when_hybrid_portrait_is_
         bouncer=bouncer,
         interviewer=interviewer,
         converter=converter,
+        scripter=scripter,
     )
 
     interviewer.advance_interview.assert_not_called()
     converter.generate_hybrid_portrait.assert_called_once_with(PORTRAIT_BYTES, dossier)
     client.send_photo.assert_called_once_with(chat_id=111, photo_bytes=HYBRID_PORTRAIT_BYTES)
-    client.send_message.assert_not_called()
+    scripter.generate_script.assert_called_once_with(dossier)
+    client.send_message.assert_called_once_with(chat_id=111, text=SAMPLE_SCRIPT)
     state = sessions.get(chat_id=111)
     assert state.phase == SessionPhase.GENERATING_MEDIA
     assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script == SAMPLE_SCRIPT
 
 
-def test_text_during_generating_media_sends_complete_nudge_when_hybrid_portrait_delivered() -> None:
-    """Text in GENERATING_MEDIA after hybrid_portrait is stored sends INTERVIEW_COMPLETE_NUDGE."""
+def test_generating_media_retries_only_scripter_when_script_missing() -> None:
+    """Text in GENERATING_MEDIA with a portrait and no script retries only the Scripter."""
     client = MagicMock(spec=TelegramClient)
     bouncer = MagicMock(spec=Bouncer)
     interviewer = MagicMock(spec=Interviewer)
     converter = _ready_converter()
+    scripter = _ready_scripter()
+    dossier = BehavioralDossier(
+        summary="Completed dossier with portrait already delivered.",
+        suggested_animal="Red Panda",
+    )
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
+    sessions.set_hybrid_portrait(chat_id=111, hybrid_portrait=HYBRID_PORTRAIT_BYTES)
+    assert sessions.get(chat_id=111).script is None
+
+    process_update(
+        update=_text_update(chat_id=111, text="Retry my script please!"),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+    )
+
+    converter.generate_hybrid_portrait.assert_not_called()
+    client.send_photo.assert_not_called()
+    scripter.generate_script.assert_called_once_with(dossier)
+    client.send_message.assert_called_once_with(chat_id=111, text=SAMPLE_SCRIPT)
+    state = sessions.get(chat_id=111)
+    assert state.phase == SessionPhase.GENERATING_MEDIA
+    assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script == SAMPLE_SCRIPT
+
+
+def test_generating_media_second_scripter_failure_sends_fallback_and_keeps_portrait(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A second Scripter failure on the retry-only path sends fallback and keeps portrait."""
+    client = MagicMock(spec=TelegramClient)
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = MagicMock(spec=Scripter)
+    scripter.generate_script.side_effect = ScripterError("typewriter jammed again")
+    sessions, dossier = _completed_media_state(with_hybrid_portrait=True)
+    assert sessions.get(chat_id=111).script is None
+
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_text_update(chat_id=111, text="Retry my script please!"),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+        )
+
+    converter.generate_hybrid_portrait.assert_not_called()
+    client.send_photo.assert_not_called()
+    scripter.generate_script.assert_called_once_with(dossier)
+    client.send_message.assert_called_once_with(
+        chat_id=111,
+        text=SCRIPTER_ERROR_FALLBACK_MESSAGE,
+    )
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        "event=scripter_failed stage=gateway chat_id=111" in r.getMessage()
+        and r.exc_info is not None
+        for r in error_records
+    )
+    state = sessions.get(chat_id=111)
+    assert state.phase == SessionPhase.GENERATING_MEDIA
+    assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script is None
+
+
+def test_scripter_fallback_send_failure_is_logged_and_preserves_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing Scripter fallback send logs event=scripter_fallback_failed without escaping."""
+    client = MagicMock(spec=TelegramClient)
+    client.send_message.side_effect = TelegramClientError("fallback send failed")
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = MagicMock(spec=Scripter)
+    scripter.generate_script.side_effect = ScripterError("typewriter jammed")
+    sessions, _dossier = _completed_media_state(with_hybrid_portrait=True)
+
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_text_update(chat_id=111, text="Retry my script please!"),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+        )
+
+    client.send_message.assert_called_once_with(
+        chat_id=111,
+        text=SCRIPTER_ERROR_FALLBACK_MESSAGE,
+    )
+    assert "event=scripter_fallback_failed stage=gateway chat_id=111" in caplog.text
+    state = sessions.get(chat_id=111)
+    assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script is None
+
+
+def test_generating_media_sends_complete_nudge_when_portrait_and_script_exist() -> None:
+    """Text in GENERATING_MEDIA with both portrait and script stored sends the nudge."""
+    client = MagicMock(spec=TelegramClient)
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = _ready_scripter()
     dossier = BehavioralDossier(
         summary="Completed dossier.",
         suggested_animal="Red Panda",
@@ -503,6 +860,7 @@ def test_text_during_generating_media_sends_complete_nudge_when_hybrid_portrait_
     sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
     sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
     sessions.set_hybrid_portrait(chat_id=111, hybrid_portrait=HYBRID_PORTRAIT_BYTES)
+    sessions.set_script(chat_id=111, script=SAMPLE_SCRIPT)
 
     process_update(
         update=_text_update(chat_id=111, text="Any more questions?"),
@@ -511,16 +869,19 @@ def test_text_during_generating_media_sends_complete_nudge_when_hybrid_portrait_
         bouncer=bouncer,
         interviewer=interviewer,
         converter=converter,
+        scripter=scripter,
     )
 
     interviewer.advance_interview.assert_not_called()
     converter.generate_hybrid_portrait.assert_not_called()
     client.send_photo.assert_not_called()
+    scripter.generate_script.assert_not_called()
     client.send_message.assert_called_once_with(chat_id=111, text=INTERVIEW_COMPLETE_NUDGE)
     state = sessions.get(chat_id=111)
     assert state.phase == SessionPhase.GENERATING_MEDIA
     assert state.dossier == dossier
     assert state.hybrid_portrait == HYBRID_PORTRAIT_BYTES
+    assert state.script == SAMPLE_SCRIPT
 
 
 @pytest.mark.parametrize("blank_text", ["", "   ", "\t\n"])
@@ -546,6 +907,7 @@ def test_empty_or_whitespace_text_during_interviewing_reprompts_without_advancin
         bouncer=bouncer,
         interviewer=interviewer,
         converter=converter,
+        scripter=_ready_scripter(),
     )
 
     interviewer.advance_interview.assert_not_called()
@@ -577,6 +939,7 @@ def test_interviewer_error_during_turn_sends_fallback_and_preserves_history_and_
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_called_once_with(
@@ -606,6 +969,7 @@ def test_update_without_message_is_ignored(caplog: pytest.LogCaptureFixture) -> 
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_not_called()
@@ -636,6 +1000,7 @@ def test_message_without_photo_or_text_is_ignored(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_not_called()
@@ -672,6 +1037,7 @@ def test_download_error_sends_fallback_logs_traceback_and_preserves_state(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_called_once_with(chat_id=98765, text=ERROR_FALLBACK_MESSAGE)
@@ -702,6 +1068,7 @@ def test_bouncer_error_sends_fallback_logs_traceback_and_preserves_state(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.send_message.assert_called_once_with(chat_id=98765, text=ERROR_FALLBACK_MESSAGE)
@@ -728,6 +1095,7 @@ def test_human_photo_during_interviewing_replaces_portrait_and_restarts_intervie
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     client.send_message.assert_called_once_with(chat_id=98765, text="Fresh Question 1?")
@@ -755,6 +1123,7 @@ def test_human_photo_logs_bouncer_and_interviewer_stages_with_chat_id(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     bouncer_records = [r for r in caplog.records if "stage=bouncer" in r.getMessage()]
@@ -784,6 +1153,7 @@ def test_non_human_photo_during_interviewing_resets_session() -> None:
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     client.send_message.assert_called_once_with(chat_id=98765, text=cheeky)
@@ -819,6 +1189,7 @@ def test_missing_or_empty_file_path_sends_fallback_without_downloading_or_evalua
             bouncer=bouncer,
             interviewer=interviewer,
             converter=_ready_converter(),
+            scripter=_ready_scripter(),
         )
 
     client.download_file.assert_not_called()
@@ -845,6 +1216,7 @@ def test_two_chat_ids_do_not_leak_phase_or_portrait() -> None:
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
     process_update(
         update=_text_update(chat_id=2002, update_id=106),
@@ -853,6 +1225,7 @@ def test_two_chat_ids_do_not_leak_phase_or_portrait() -> None:
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     assert sessions.get(chat_id=1001).phase == SessionPhase.INTERVIEWING
@@ -891,6 +1264,7 @@ def test_start_or_restart_command_resets_session_from_interviewing_or_generating
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
 
     client.send_message.assert_called_once_with(chat_id=111, text=AWAITING_PHOTO_NUDGE)
@@ -906,6 +1280,7 @@ def test_start_or_restart_command_resets_session_from_interviewing_or_generating
     sessions.start_interview(chat_id=111, portrait=b"p1", first_question="Q1?")
     sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
     sessions.set_hybrid_portrait(chat_id=111, hybrid_portrait=HYBRID_PORTRAIT_BYTES)
+    sessions.set_script(chat_id=111, script=SAMPLE_SCRIPT)
     sessions.start_interview(chat_id=222, portrait=b"other-portrait", first_question="Other Q1?")
 
     process_update(
@@ -915,10 +1290,12 @@ def test_start_or_restart_command_resets_session_from_interviewing_or_generating
         bouncer=bouncer,
         interviewer=interviewer,
         converter=_ready_converter(),
+        scripter=_ready_scripter(),
     )
     assert sessions.get(chat_id=111).phase == SessionPhase.AWAITING_PHOTO
     assert sessions.get(chat_id=111).dossier is None
     assert sessions.get(chat_id=111).hybrid_portrait is None
+    assert sessions.get(chat_id=111).script is None
     assert sessions.get(chat_id=222).phase == SessionPhase.INTERVIEWING
     assert sessions.get(chat_id=222).portrait == b"other-portrait"
 
@@ -941,6 +1318,7 @@ def test_poll_once_fetches_updates_replies_and_advances_offset() -> None:
         bouncer=bouncer,
         interviewer=interviewer,
         converter=converter,
+        scripter=_ready_scripter(),
         offset=200,
         timeout=30,
     )
@@ -967,6 +1345,7 @@ def test_poll_once_preserves_offset_when_no_updates_returned() -> None:
         bouncer=bouncer,
         interviewer=interviewer,
         converter=converter,
+        scripter=_ready_scripter(),
         offset=55,
         timeout=30,
     )
@@ -993,6 +1372,7 @@ def test_poll_once_handles_get_updates_error_gracefully_and_preserves_offset(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=_ready_scripter(),
             offset=42,
             timeout=30,
         )
@@ -1027,6 +1407,7 @@ def test_poll_once_handles_send_message_error_gracefully_and_advances_offset(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=_ready_scripter(),
             offset=300,
             timeout=30,
         )
@@ -1058,6 +1439,7 @@ def test_run_polling_loop_logs_startup_and_advances_offsets(
             bouncer=bouncer,
             interviewer=interviewer,
             converter=converter,
+            scripter=_ready_scripter(),
             timeout=5,
             max_iterations=2,
         )

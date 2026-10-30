@@ -26,6 +26,7 @@ class SessionState(BaseModel):
     interview_history: list[InterviewTurn] = Field(default_factory=list)
     dossier: BehavioralDossier | None = None
     hybrid_portrait: bytes | None = None
+    script: str | None = None
 
 
 class SessionStore:
@@ -68,6 +69,7 @@ class SessionStore:
         state.interview_history = []
         state.dossier = None
         state.hybrid_portrait = None
+        state.script = None
         return state
 
     @log_stage("session")
@@ -118,6 +120,16 @@ class SessionStore:
         return state
 
     @log_stage("session")
+    def set_script(self, chat_id: int, script: str) -> SessionState:
+        """Store the generated documentary narration script for a chat."""
+        cleaned = script.strip()
+        if not cleaned:
+            raise ValueError("script must not be empty.")
+        state = self.get(chat_id)
+        state.script = cleaned
+        return state
+
+    @log_stage("session")
     def reset(self, chat_id: int) -> SessionState:
         """Clear portrait and interview artifacts and return the chat to AWAITING_PHOTO."""
         state = self.get(chat_id)
@@ -127,4 +139,5 @@ class SessionStore:
         state.interview_history = []
         state.dossier = None
         state.hybrid_portrait = None
+        state.script = None
         return state

@@ -20,6 +20,7 @@ def test_get_creates_default_state_awaiting_photo_without_portrait() -> None:
     assert state.interview_history == []
     assert state.dossier is None
     assert state.hybrid_portrait is None
+    assert state.script is None
 
 
 def test_get_is_stable_across_repeated_calls() -> None:
@@ -263,3 +264,47 @@ def test_two_chat_ids_never_share_hybrid_portrait() -> None:
 
     assert store.get(chat_id=1001).hybrid_portrait == b"\x89PNG-chat-a"
     assert store.get(chat_id=2002).hybrid_portrait is None
+
+
+@pytest.mark.parametrize("blank_script", ["", "   ", "\t\n"])
+def test_set_script_stores_stripped_script_and_rejects_empty_strings(blank_script: str) -> None:
+    """set_script stores a stripped non-empty narration string and rejects blank strings."""
+    store = SessionStore()
+    narration = "  Here in the midnight kitchen, the Eurasian Badger stalks a biscuit.  "
+
+    state = store.set_script(chat_id=1001, script=narration)
+
+    assert state.script == "Here in the midnight kitchen, the Eurasian Badger stalks a biscuit."
+    assert store.get(chat_id=1001).script == (
+        "Here in the midnight kitchen, the Eurasian Badger stalks a biscuit."
+    )
+
+    with pytest.raises(ValueError, match="script"):
+        store.set_script(chat_id=1001, script=blank_script)
+
+
+def test_start_interview_and_reset_clear_script() -> None:
+    """Both start_interview and reset clear any previously stored script."""
+    store = SessionStore()
+    store.set_script(chat_id=1001, script="Here in the suburban undergrowth...")
+    assert store.get(chat_id=1001).script == "Here in the suburban undergrowth..."
+
+    state_after_start = store.start_interview(
+        chat_id=1001,
+        portrait=b"new-portrait",
+        first_question="Q1?",
+    )
+    assert state_after_start.script is None
+
+    store.set_script(chat_id=1001, script="Another narration paragraph.")
+    state_after_reset = store.reset(chat_id=1001)
+    assert state_after_reset.script is None
+
+
+def test_two_chat_ids_never_share_script() -> None:
+    """script is strictly isolated per chat_id."""
+    store = SessionStore()
+    store.set_script(chat_id=1001, script="Chat A documentary narration.")
+
+    assert store.get(chat_id=1001).script == "Chat A documentary narration."
+    assert store.get(chat_id=2002).script is None

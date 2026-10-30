@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from telegram_documentaries.models import (
     BehavioralDossier,
     BouncerVerdict,
+    DocumentaryScript,
     GeneratedImage,
     GetFileResponse,
     InterviewerTurnResult,
@@ -389,3 +390,67 @@ def test_send_photo_response_parses_valid_envelope_and_rejects_malformed() -> No
                 "result": {"message_id": "not-an-int", "chat": {"id": 12345}},
             }
         )
+
+
+def test_documentary_script_validates_single_paragraph_and_has_description() -> None:
+    """Accept valid prose, carry description metadata, and collapse newlines.
+
+    Markdown and whitespace normalisation are covered by the tests below.
+    """
+    script = DocumentaryScript(
+        narration="  Here in the fluorescent-lit kitchen, the solitary Eurasian Badger\n\n"
+        "tiptoes toward the fridge at midnight.\r\nIt guards the biscuit tin fiercely.  "
+    )
+
+    assert script.narration == (
+        "Here in the fluorescent-lit kitchen, the solitary Eurasian Badger "
+        "tiptoes toward the fridge at midnight. It guards the biscuit tin fiercely."
+    )
+    assert "\n" not in script.narration
+    assert "\r" not in script.narration
+
+    narration_field = DocumentaryScript.model_fields["narration"]
+    assert narration_field.description is not None and narration_field.description.strip()
+
+
+@pytest.mark.parametrize("blank_narration", ["", "   ", "\t\n\r"])
+def test_documentary_script_rejects_empty_or_whitespace_narration(blank_narration: str) -> None:
+    """DocumentaryScript rejects empty or whitespace-only narration strings."""
+    with pytest.raises(ValidationError):
+        DocumentaryScript(narration=blank_narration)
+
+
+@pytest.mark.parametrize(
+    ("raw_narration", "expected_narration"),
+    [
+        (
+            "**Here** in the kitchen, *the badger* prowls.",
+            "Here in the kitchen, the badger prowls.",
+        ),
+        (
+            "_Under_ the `moonlight`, the badger feasts.",
+            "Under the moonlight, the badger feasts.",
+        ),
+        (
+            "# Heading\nThe badger wakes.",
+            "Heading The badger wakes.",
+        ),
+        (
+            "A   badger\t\tguards\n\n the  biscuit tin.",
+            "A badger guards the biscuit tin.",
+        ),
+    ],
+)
+def test_documentary_script_strips_markdown_and_normalises_whitespace(
+    raw_narration: str,
+    expected_narration: str,
+) -> None:
+    """Markdown emphasis, code, heading markers, and whitespace runs are normalised away."""
+    assert DocumentaryScript(narration=raw_narration).narration == expected_narration
+
+
+@pytest.mark.parametrize("marker_only", ["***", "___", "```", "###", "**__`#`__**"])
+def test_documentary_script_rejects_marker_only_narration(marker_only: str) -> None:
+    """Narration made only of markdown markers is rejected as empty."""
+    with pytest.raises(ValidationError):
+        DocumentaryScript(narration=marker_only)
