@@ -5,12 +5,13 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 ---
 
 ## Phase 1: Repository Skeleton & Telegram Polling Gateway
-- **Status:** Pending
+- **Status:** Completed
 - **Goal:** Establish the Python project structure, dependency configuration, developer scripts (`scripts/test`, `scripts/hooks`), `.env` configuration loader, and a basic Telegram Long Polling loop that echoes or replies with a hardcoded greeting.
 - **Acceptance Criteria:**
-  - `scripts/test` and `scripts/hooks` execute cleanly (`pytest`, `ruff`, `mypy`).
-  - Pydantic settings validate `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY` from `.env`.
-  - Long polling gateway connects to Telegram and responds to incoming messages.
+  - [x] `scripts/test` and `scripts/hooks` execute cleanly (`pytest`, `ruff`, `mypy`, `pre-commit` with `gitleaks`).
+  - [x] Pydantic settings validate `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY` from `.env` (rejecting empty or placeholder values).
+  - [x] Long polling gateway connects to Telegram (`getUpdates` / `sendMessage` with Pydantic v2 boundary models and `@log_stage` structured logging) and replies `"hey mate!"` to incoming messages.
+- **Delivery Summary:** Implemented `pyproject.toml`, `.pre-commit-config.yaml`, `scripts/test`, `scripts/hooks`, `src/telegram_documentaries/{config,logging_utils,models,telegram_client,poller,main}.py`, `main.py`, and 24 unit/boundary tests under `tests/`.
 - **Rubric Alignment:** Project setup, repository hygiene, and working Telegram long-polling connection.
 
 ---
