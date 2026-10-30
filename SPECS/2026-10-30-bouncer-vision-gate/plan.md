@@ -83,3 +83,17 @@ All work is Red/Green TDD: write the failing test, run `./scripts/test` to see i
 3. Report the two manual checks for the user to run on their phone:
    - Negative: send a photo of an object/landscape → cheeky rejection naming the subject, no interview.
    - Positive: send a portrait of a person → `hey mate!`, session admitted.
+
+---
+
+## Task Group 7: Bug Fix — Primary-Subject Car Rejection, Schema Ordering & Verdict Logging (TDD)
+1. **Red — update `tests/test_models.py`, `tests/test_bouncer.py`, `tests/test_polling.py`:**
+   - Assert `BouncerVerdict.model_fields` order puts `subject` first (`list(BouncerVerdict.model_fields.keys()) == ["subject", "is_human", "rejection_message"]`), that each field carries a non-empty `description`, and that an empty/whitespace `subject` raises `ValidationError`.
+   - Assert `BOUNCER_INSTRUCTION` explicitly requires a human to be the primary/central subject and rejects cars/vehicles even when a driver, reflection, or background bystander is visible.
+   - Assert `Bouncer.evaluate` logs `event=bouncer_verdict stage=bouncer is_human=... subject=...` at `INFO` level on both human and non-human verdicts.
+   - Assert `/start` and `/restart` text messages in `INTERVIEWING` reset the session back to `AWAITING_PHOTO` (clearing the portrait) and reply with `AWAITING_PHOTO_NUDGE`.
+2. **Green — update `models.py`, `bouncer.py`, `poller.py`:**
+   - Reorder `BouncerVerdict` fields (`subject`, `is_human`, `rejection_message`), add `Field(description=...)`, and validate non-empty `subject`.
+   - Tighten `BOUNCER_INSTRUCTION` and `BOUNCER_PROMPT` and emit the `event=bouncer_verdict` info log in `Bouncer.evaluate`.
+   - Handle `/start` and `/restart` in `poller.py`.
+3. **Verify:** Run `./scripts/test` and `./scripts/hooks`.

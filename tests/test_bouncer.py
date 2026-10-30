@@ -10,6 +10,8 @@ from google.genai import types
 from pydantic import ValidationError
 
 from telegram_documentaries.bouncer import (
+    BOUNCER_INSTRUCTION,
+    BOUNCER_PROMPT,
     DEFAULT_BOUNCER_MODEL,
     DEFAULT_REJECTION_MESSAGE,
     Bouncer,
@@ -269,3 +271,43 @@ def test_evaluate_chains_validation_error_for_malformed_output() -> None:
         bouncer.evaluate(image_bytes=b"image-bytes")
 
     assert isinstance(exc_info.value.__cause__, ValidationError)
+
+
+def test_bouncer_instruction_requires_primary_human_subject_and_rejects_cars_with_drivers() -> None:
+    """BOUNCER_INSTRUCTION and BOUNCER_PROMPT require a primary human subject and reject cars."""
+    lowered_instruction = BOUNCER_INSTRUCTION.lower()
+    lowered_prompt = BOUNCER_PROMPT.lower()
+    assert "primary" in lowered_instruction
+    assert "car" in lowered_instruction or "vehicle" in lowered_instruction
+    assert "driver" in lowered_instruction
+    assert "reflection" in lowered_instruction
+    assert "background" in lowered_instruction or "bystander" in lowered_instruction
+    assert "subject" in lowered_prompt
+
+
+def test_evaluate_logs_bouncer_verdict_at_info_for_human_and_non_human(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """evaluate logs event=bouncer_verdict with is_human and subject at INFO level."""
+    human_client = _fake_client(
+        '{"subject": "a portrait of a woman", "is_human": true, "rejection_message": ""}'
+    )
+    car_client = _fake_client(
+        '{"subject": "a red parked car", "is_human": false, "rejection_message": "Nice car, mate."}'
+    )
+
+    with caplog.at_level(logging.INFO, logger="telegram_documentaries"):
+        Bouncer(api_key="test-key", client=human_client).evaluate(image_bytes=b"human")
+        Bouncer(api_key="test-key", client=car_client).evaluate(image_bytes=b"car")
+
+    verdict_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO and "event=bouncer_verdict" in record.getMessage()
+    ]
+    assert any(
+        "stage=bouncer is_human=True subject='a portrait of a woman'" in msg for msg in verdict_logs
+    )
+    assert any(
+        "stage=bouncer is_human=False subject='a red parked car'" in msg for msg in verdict_logs
+    )

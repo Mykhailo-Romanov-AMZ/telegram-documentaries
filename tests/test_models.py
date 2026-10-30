@@ -166,3 +166,29 @@ def test_bouncer_verdict_requires_is_human() -> None:
     """A verdict missing is_human is rejected rather than defaulted."""
     with pytest.raises(ValidationError):
         BouncerVerdict.model_validate({"subject": "a toaster"})
+
+
+def test_bouncer_verdict_orders_subject_before_is_human_with_descriptions() -> None:
+    """BouncerVerdict lists subject first and documents every field for structured output."""
+    assert list(BouncerVerdict.model_fields.keys()) == [
+        "subject",
+        "is_human",
+        "rejection_message",
+    ]
+    for field_name, field_info in BouncerVerdict.model_fields.items():
+        assert field_info.description is not None and field_info.description.strip(), (
+            f"Expected non-empty description on BouncerVerdict.{field_name}"
+        )
+
+
+@pytest.mark.parametrize("blank_subject", ["", "   ", "\t\n"])
+def test_bouncer_verdict_rejects_empty_or_whitespace_subject(blank_subject: str) -> None:
+    """BouncerVerdict rejects an empty or whitespace-only subject."""
+    with pytest.raises(ValidationError):
+        BouncerVerdict.model_validate(
+            {
+                "subject": blank_subject,
+                "is_human": False,
+                "rejection_message": "Nope.",
+            }
+        )

@@ -456,6 +456,49 @@ def test_two_chat_ids_do_not_leak_phase_or_portrait() -> None:
     client.send_message.assert_any_call(chat_id=2002, text=AWAITING_PHOTO_NUDGE)
 
 
+@pytest.mark.parametrize(
+    "command_text",
+    [
+        "/start",
+        "/restart",
+        "  /start  ",
+        "/RESTART",
+        "/start@NatureDocBot",
+        "/restart@NatureDocBot",
+    ],
+)
+def test_start_or_restart_command_resets_session_from_interviewing_and_sends_nudge(
+    command_text: str,
+) -> None:
+    """/start and /restart in INTERVIEWING reset the session to AWAITING_PHOTO and send nudge."""
+    client = MagicMock(spec=TelegramClient)
+    bouncer = MagicMock(spec=Bouncer)
+    sessions = SessionStore()
+    sessions.set_portrait(chat_id=111, portrait=b"existing-portrait")
+
+    process_update(
+        update=_text_update(chat_id=111, text=command_text),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+    )
+
+    client.send_message.assert_called_once_with(chat_id=111, text=AWAITING_PHOTO_NUDGE)
+    state = sessions.get(chat_id=111)
+    assert state.phase == SessionPhase.AWAITING_PHOTO
+    assert state.portrait is None
+    # Another chat's session remains untouched
+    sessions.set_portrait(chat_id=222, portrait=b"other-portrait")
+    process_update(
+        update=_text_update(chat_id=111, text="/restart", update_id=120),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+    )
+    assert sessions.get(chat_id=222).phase == SessionPhase.INTERVIEWING
+    assert sessions.get(chat_id=222).portrait == b"other-portrait"
+
+
 def test_poll_once_fetches_updates_replies_and_advances_offset() -> None:
     """poll_once processes all returned updates and returns max_update_id + 1."""
     client = MagicMock(spec=TelegramClient)
