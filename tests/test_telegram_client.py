@@ -1,5 +1,6 @@
 """Tests for Telegram Pydantic boundary schemas and TelegramClient."""
 
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -11,10 +12,11 @@ from telegram_documentaries.models import (
     GetUpdatesResponse,
     SendMessagePayload,
     TelegramChat,
+    TelegramFile,
     TelegramMessage,
     TelegramUpdate,
 )
-from telegram_documentaries.telegram_client import TelegramClient
+from telegram_documentaries.telegram_client import TelegramClient, TelegramClientError
 
 
 def test_parse_valid_get_updates_response_with_text_and_non_text_messages() -> None:
@@ -170,3 +172,192 @@ def test_telegram_client_send_message_validates_and_posts_payload() -> None:
         timeout=15,
     )
     mock_response.raise_for_status.assert_called_once()
+
+
+def test_telegram_client_get_file_calls_get_file_and_returns_validated_model() -> None:
+    """TelegramClient.get_file requests getFile metadata and returns a TelegramFile."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {
+        "ok": True,
+        "result": {
+            "file_id": "photo-file-id",
+            "file_unique_id": "unique-photo-id",
+            "file_size": 4096,
+            "file_path": "photos/file_2.jpg",
+        },
+    }
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    telegram_file = client.get_file(file_id="photo-file-id")
+
+    assert isinstance(telegram_file, TelegramFile)
+    assert telegram_file.file_id == "photo-file-id"
+    assert telegram_file.file_path == "photos/file_2.jpg"
+    assert telegram_file.file_size == 4096
+
+    mock_session.get.assert_called_once_with(
+        "https://api.telegram.org/bottest-token-123/getFile",
+        params={"file_id": "photo-file-id"},
+        timeout=15,
+    )
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_telegram_client_get_file_raises_on_non_200_response() -> None:
+    """get_file never silently returns None when Telegram responds with an HTTP error."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.raise_for_status.side_effect = requests.HTTPError("400 Bad Request")
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError) as exc_info:
+        client.get_file(file_id="photo-file-id")
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
+def test_telegram_client_download_file_returns_raw_bytes() -> None:
+    """download_file GETs the Telegram file endpoint and returns the raw body bytes."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.content = b"\xff\xd8\xff\xe0raw-jpeg-bytes"
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    downloaded = client.download_file(file_path="photos/file_2.jpg")
+
+    assert downloaded == b"\xff\xd8\xff\xe0raw-jpeg-bytes"
+    mock_session.get.assert_called_once_with(
+        "https://api.telegram.org/file/bottest-token-123/photos/file_2.jpg",
+        timeout=30,
+    )
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_telegram_client_download_file_raises_on_empty_body() -> None:
+    """download_file rejects an empty response body instead of returning empty bytes."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.content = b""
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError):
+        client.download_file(file_path="photos/file_2.jpg")
+
+
+def test_telegram_client_download_file_raises_on_non_200_response() -> None:
+    """download_file raises a typed error when Telegram responds with an HTTP error."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError) as exc_info:
+        client.download_file(file_path="photos/missing.jpg")
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
+def test_telegram_client_download_file_normalises_leading_slash_in_path() -> None:
+    """download_file builds the same file URL when file_path starts with a slash."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.content = b"raw-bytes"
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    downloaded = client.download_file(file_path="/photos/file_2.jpg")
+
+    assert downloaded == b"raw-bytes"
+    mock_session.get.assert_called_once_with(
+        "https://api.telegram.org/file/bottest-token-123/photos/file_2.jpg",
+        timeout=30,
+    )
+
+
+def test_telegram_client_get_file_wraps_malformed_envelope() -> None:
+    """get_file wraps a schema-invalid getFile envelope instead of leaking ValidationError."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {"ok": True, "result": {"file_id": "missing-unique-id"}}
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError) as exc_info:
+        client.get_file(file_id="photo-file-id")
+
+    assert exc_info.value.__cause__ is None
+    assert "invalid response" in str(exc_info.value)
+
+
+def test_telegram_client_reports_json_decode_error_as_invalid_response() -> None:
+    """Malformed JSON is reported as an invalid response rather than a failed HTTP request."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
+    mock_session.get.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError) as exc_info:
+        client.get_updates()
+
+    assert exc_info.value.__cause__ is None
+    assert "invalid response" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "http_method", "endpoint"),
+    [
+        ("get_updates", "get", "getUpdates"),
+        ("send_message", "post", "sendMessage"),
+        ("get_file", "get", "getFile"),
+        ("download_file", "get", "download_file"),
+    ],
+)
+def test_telegram_client_errors_never_leak_bot_token(
+    caplog: pytest.LogCaptureFixture,
+    method_name: str,
+    http_method: str,
+    endpoint: str,
+) -> None:
+    """Every Telegram request failure raises a token-free typed error and logs no token."""
+    token = "super-secret-bot-token-123"
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.status_code = 401
+    mock_response.raise_for_status.side_effect = requests.HTTPError(
+        f"401 Client Error: Unauthorized for url: https://api.telegram.org/bot{token}/{endpoint}",
+        response=mock_response,
+    )
+    getattr(mock_session, http_method).return_value = mock_response
+
+    client = TelegramClient(bot_token=token, session=mock_session)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(TelegramClientError) as exc_info:
+        if method_name == "get_updates":
+            client.get_updates()
+        elif method_name == "send_message":
+            client.send_message(chat_id=123, text="hey mate!")
+        elif method_name == "get_file":
+            client.get_file(file_id="photo-file-id")
+        else:
+            client.download_file(file_path="photos/file_2.jpg")
+
+    message = str(exc_info.value)
+    assert token not in message
+    assert token not in caplog.text
+    assert endpoint in message
+    assert "401" in message
+    assert exc_info.value.__cause__ is None

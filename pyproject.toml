@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Interactive Telegram bot producing nature documentary narrations and hybrid wildlife portraits."
 requires-python = ">=3.11"
 dependencies = [
+    "google-genai>=2.0",
     "pydantic>=2.0",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
