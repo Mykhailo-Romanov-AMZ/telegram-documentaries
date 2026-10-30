@@ -17,6 +17,14 @@ AWAITING_PHOTO_NUDGE = (
     "Send one through and I'll take a look."
 )
 ERROR_FALLBACK_MESSAGE = "My binoculars fogged up — send that photo again?"
+_RESET_COMMANDS = frozenset({"/start", "/restart"})
+
+
+def _is_reset_command(text: str) -> bool:
+    """Return True when text is a /start or /restart bot command (with optional @bot suffix)."""
+    command_token = text.strip().split(maxsplit=1)[0] if text.strip() else ""
+    base_command = command_token.partition("@")[0].lower()
+    return base_command in _RESET_COMMANDS
 
 
 def _largest_photo(photo: list[TelegramPhotoSize]) -> TelegramPhotoSize:
@@ -97,6 +105,10 @@ def process_update(
         return
 
     if message.text is not None:
+        if _is_reset_command(message.text):
+            sessions.reset(chat_id=chat_id)
+            client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
+            return
         if sessions.get(chat_id).phase == SessionPhase.AWAITING_PHOTO:
             client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
         else:

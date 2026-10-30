@@ -71,12 +71,13 @@ When started, the bot logs `Telegram polling loop started...`, long-polls `getUp
 
 ### Photo Gate Behaviour
 
-- **Human portrait:** the largest photo size is downloaded, classified by the Bouncer, the portrait bytes are stored in the chat's session, and the bot replies `"hey mate!"`.
-- **Non-human photo** (pet, car, food, landscape, object): the Bouncer's cheeky rejection is sent, naming what it actually saw, and the session resets to `AWAITING_PHOTO`.
-- **Text while awaiting a photo:** the bot sends a polite in-character nudge asking for a portrait.
+- **Human portrait:** the largest photo size is downloaded, classified by the Bouncer (requiring a real human as the primary, central subject), the portrait bytes are stored in the chat's session (`INTERVIEWING`), and the bot replies `"hey mate!"`.
+- **Non-human photo** (pet, car/vehicle even with a visible driver/reflection/bystander, food, landscape, object): the Bouncer's cheeky rejection is sent, naming what it actually saw, and the session resets to `AWAITING_PHOTO`.
+- **Text while awaiting a photo:** the bot sends a polite in-character nudge (`AWAITING_PHOTO_NUDGE`) asking for a portrait.
+- **`/start` or `/restart` in any phase:** resets the chat's session back to `AWAITING_PHOTO` (clearing any stored portrait) and sends `AWAITING_PHOTO_NUDGE`.
 - **Download or Gemini failure:** the bot replies with an in-character fallback (`"My binoculars fogged up — send that photo again?"`) and leaves session state unchanged; the full traceback is logged.
 
-The vision gate uses `google-genai` structured output (`BouncerVerdict`) with the `gemini-3.1-flash-lite-preview` model. `GEMINI_API_KEY` is now used at runtime as well as validated at startup.
+The vision gate uses `google-genai` structured output (`BouncerVerdict` with fields ordered `subject`, `is_human`, `rejection_message`) with the `gemini-3.1-flash-lite-preview` model and logs every verdict (`event=bouncer_verdict stage=bouncer is_human=... subject=...`) at `INFO` level. `GEMINI_API_KEY` is used at runtime as well as validated at startup.
 
 ## Developer Scripts & Quality Checks
 

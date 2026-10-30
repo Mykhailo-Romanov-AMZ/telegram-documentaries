@@ -1,12 +1,13 @@
 # Phase 2 Validation Checklist: The Bouncer (Vision Gate) & Session State
 
 ## Automated Verification
-- [x] `./scripts/test` — full pytest suite passes (81 passed; Phase 1 tests rewritten to the new signature, no skips/xfails added to dodge failures).
+- [x] `./scripts/test` — full pytest suite passes (93 passed; Phase 1 tests rewritten to the new signature, no skips/xfails added to dodge failures).
 - [x] `./scripts/hooks` — `ruff check`, `ruff format --check`, `mypy` (strict, `src` + `tests`), `pytest`, and `pre-commit run --all-files` (incl. `gitleaks`) all pass.
 - [x] No new `# type: ignore`, `noqa`, or `Any` escape hatches introduced without a documented reason.
 
 ## Contract Verification
 - [x] `TelegramPhotoSize`, `TelegramFile`, `GetFileResponse`, `BouncerVerdict` exist as Pydantic v2 models and are the only shapes crossing module boundaries (no raw dicts).
+- [x] `BouncerVerdict` orders `subject` first (`["subject", "is_human", "rejection_message"]`), validates non-empty `subject`, and defines `Field(description=...)` on every field.
 - [x] `TelegramMessage.photo` is optional and text-only messages still parse.
 - [x] `SessionState.chat_id` is a strict int; `SessionPhase` is an enum with `AWAITING_PHOTO` and `INTERVIEWING`.
 - [x] `BouncerError` is raised (never silently swallowed) for malformed or failed Gemini responses.
@@ -15,6 +16,8 @@
 - [x] Human photo → `hey mate!` sent, phase `INTERVIEWING`, portrait bytes stored.
 - [x] Non-human photo → cheeky `rejection_message` sent, phase reset to `AWAITING_PHOTO`, portrait cleared.
 - [x] Text while `AWAITING_PHOTO` → `AWAITING_PHOTO_NUDGE` sent, phase unchanged.
+- [x] `/start` or `/restart` in any phase (including `INTERVIEWING`) → session reset to `AWAITING_PHOTO` (portrait cleared) and `AWAITING_PHOTO_NUDGE` sent.
+- [x] `Bouncer.evaluate` logs `event=bouncer_verdict stage=bouncer is_human=<bool> subject=<repr>` at `INFO` level on every evaluation, and `BOUNCER_INSTRUCTION` requires a real human to be the primary/central subject (rejecting cars/vehicles even with drivers, reflections, or bystanders).
 - [x] Empty/absent `message` → no send, no state change.
 - [x] `chat_id` A state never leaks into `chat_id` B.
 - [x] Download failure and Gemini failure each → `ERROR_FALLBACK_MESSAGE`, loud traceback log, state unchanged.

@@ -61,9 +61,34 @@ class GetFileResponse(BaseModel):
 class BouncerVerdict(BaseModel):
     """Structured verdict returned by the Bouncer vision gate."""
 
-    is_human: StrictBool
-    subject: str
-    rejection_message: str = ""
+    subject: str = Field(
+        description=(
+            "Description of the single primary, central subject of the image "
+            "(e.g. a parked car, a coffee mug, a cat, or a human portrait)."
+        )
+    )
+    is_human: StrictBool = Field(
+        description=(
+            "True ONLY when the primary, central subject of the photo is a real human "
+            "person (portrait/selfie/person); False if the primary subject is a car, "
+            "vehicle, pet, animal, food, object, landscape, or illustration — even if a "
+            "driver inside a car, a reflection, or background bystanders are visible."
+        )
+    )
+    rejection_message: str = Field(
+        default="",
+        description=(
+            "Short, cheeky, in-character rejection naming the non-human subject when "
+            "is_human is False (empty when is_human is True)."
+        ),
+    )
+
+    @field_validator("subject")
+    @classmethod
+    def validate_non_empty_subject(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("BouncerVerdict subject must not be empty.")
+        return value
 
 
 class SendMessageResponse(BaseModel):

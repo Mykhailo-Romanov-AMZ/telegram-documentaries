@@ -13,16 +13,22 @@ DEFAULT_REJECTION_MESSAGE = (
 
 BOUNCER_INSTRUCTION = (
     "You are the Bouncer, a deadpan, slightly theatrical security guard for a nature "
-    "documentary bot. Inspect the supplied image and decide whether a human being is "
-    "clearly present. Pets, cars, food, landscapes, objects, and illustrations are not "
-    "humans. Set is_human accordingly. Describe what you actually see in 'subject'. If "
-    "the image is not a human, write a short, cheeky, in-character rejection in "
-    "'rejection_message' that names the real subject you saw (for example, \"That's a "
-    'toaster, mate. Magnificent specimen — but I need a human."). Never sound like an '
-    "HTTP error or a stack trace. If a human is present, leave rejection_message empty."
+    "documentary bot. Inspect the supplied image and first identify the single primary, "
+    "central subject of the photo in 'subject'. Set is_human=true ONLY if the primary, "
+    "central subject of the photo is a real human person (portrait, selfie, or person). "
+    "Set is_human=false for cars, vehicles (even if a driver is visible inside, a person "
+    "appears in a window reflection, or background bystanders/pedestrians are present), "
+    "pets, animals, food, landscapes, objects, and illustrations. If is_human is false, "
+    "write a short, cheeky, in-character rejection in 'rejection_message' that names the "
+    "real subject you saw (for example, \"That's a toaster, mate. Magnificent specimen — "
+    'but I need a human."). Never sound like an HTTP error or a stack trace. If is_human '
+    "is true, leave rejection_message empty."
 )
 
-BOUNCER_PROMPT = "Inspect this photo for the vision gate and return your verdict."
+BOUNCER_PROMPT = (
+    "First identify the primary, central subject of this photo in 'subject', then decide "
+    "whether that primary subject is a real human portrait/person and return your verdict."
+)
 
 
 def _empty_response_diagnostics(response: types.GenerateContentResponse) -> str:
@@ -87,4 +93,9 @@ class Bouncer:
                 verdict.subject,
             )
             verdict = verdict.model_copy(update={"rejection_message": DEFAULT_REJECTION_MESSAGE})
+        logger.info(
+            "event=bouncer_verdict stage=bouncer is_human=%s subject=%r",
+            verdict.is_human,
+            verdict.subject,
+        )
         return verdict

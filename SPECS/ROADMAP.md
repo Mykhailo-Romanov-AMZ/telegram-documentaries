@@ -20,10 +20,10 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 - **Status:** Completed
 - **Goal:** Implement the Bouncer specialist agent using `gemini-3.1-flash-lite-preview` to inspect uploaded photos, confirm a human subject is present, and reject non-human photos (cars, pets, food, objects) with a cheeky message while resetting session state.
 - **Acceptance Criteria:**
-  - [x] Incoming photo is downloaded/buffered and passed to the Bouncer with a structured Pydantic verdict schema (`is_human: bool`, `subject: str`, `rejection_message: str`).
+  - [x] Incoming photo is downloaded/buffered and passed to the Bouncer with a structured Pydantic verdict schema (`subject: str`, `is_human: StrictBool`, `rejection_message: str`).
   - [x] Human photos transition the user's `SessionState` from `AWAITING_PHOTO` to `INTERVIEWING` and retain the portrait bytes in memory.
   - [x] Non-human photos send the Bouncer's cheeky rejection message to Telegram and reset the session cleanly.
-- **Delivery Summary:** Added `google-genai`, extended boundary models (`TelegramPhotoSize`, `TelegramFile`, `GetFileResponse`, `BouncerVerdict`), added `TelegramClient.get_file`/`download_file`, an in-memory `SessionStore` (`AWAITING_PHOTO`/`INTERVIEWING`), the structured-output `Bouncer` agent, and gateway photo routing with in-character error fallbacks. 81 tests pass.
+- **Delivery Summary:** Added `google-genai`, extended boundary models (`TelegramPhotoSize`, `TelegramFile`, `GetFileResponse`, `BouncerVerdict` with `subject` ordered first and field descriptions), added `TelegramClient.get_file`/`download_file`, an in-memory `SessionStore` (`AWAITING_PHOTO`/`INTERVIEWING`), the structured-output `Bouncer` agent (primary-subject human check + `event=bouncer_verdict` info logging), and gateway photo routing with `/start` & `/restart` session reset and in-character error fallbacks. 93 tests pass.
 - **Rubric Alignment:** Vision gate accuracy, cheeky rejection handling, and state transition.
 
 ---
