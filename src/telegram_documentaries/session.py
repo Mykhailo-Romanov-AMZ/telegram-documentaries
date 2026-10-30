@@ -2,9 +2,10 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 
 from telegram_documentaries.logging_utils import log_stage
+from telegram_documentaries.models import BehavioralDossier, InterviewTurn
 
 
 class SessionPhase(StrEnum):
@@ -12,6 +13,7 @@ class SessionPhase(StrEnum):
 
     AWAITING_PHOTO = "awaiting_photo"
     INTERVIEWING = "interviewing"
+    GENERATING_MEDIA = "generating_media"
 
 
 class SessionState(BaseModel):
@@ -20,6 +22,9 @@ class SessionState(BaseModel):
     chat_id: StrictInt
     phase: SessionPhase = SessionPhase.AWAITING_PHOTO
     portrait: bytes | None = None
+    current_question: str | None = None
+    interview_history: list[InterviewTurn] = Field(default_factory=list)
+    dossier: BehavioralDossier | None = None
 
 
 class SessionStore:
@@ -45,9 +50,69 @@ class SessionStore:
         return state
 
     @log_stage("session")
+    def start_interview(
+        self,
+        chat_id: int,
+        portrait: bytes,
+        first_question: str,
+    ) -> SessionState:
+        """Store a verified portrait, set Question 1, and reset prior interview artifacts."""
+        cleaned_question = first_question.strip()
+        if not cleaned_question:
+            raise ValueError("first_question must not be empty.")
+        state = self.get(chat_id)
+        state.portrait = portrait
+        state.phase = SessionPhase.INTERVIEWING
+        state.current_question = cleaned_question
+        state.interview_history = []
+        state.dossier = None
+        return state
+
+    @log_stage("session")
+    def record_answer(
+        self,
+        chat_id: int,
+        answer: str,
+        next_question: str,
+    ) -> SessionState:
+        """Append the answered turn to interview_history and advance current_question."""
+        state = self.get(chat_id)
+        if state.current_question is None:
+            raise ValueError("Cannot record answer when current_question is None.")
+        cleaned_next = next_question.strip()
+        if not cleaned_next:
+            raise ValueError("next_question must not be empty.")
+        turn = InterviewTurn(question=state.current_question, answer=answer)
+        state.interview_history.append(turn)
+        state.current_question = cleaned_next
+        state.phase = SessionPhase.INTERVIEWING
+        return state
+
+    @log_stage("session")
+    def complete_interview(
+        self,
+        chat_id: int,
+        answer: str,
+        dossier: BehavioralDossier,
+    ) -> SessionState:
+        """Record the final answer, store the compiled dossier, and move to GENERATING_MEDIA."""
+        state = self.get(chat_id)
+        if state.current_question is None:
+            raise ValueError("Cannot complete interview when current_question is None.")
+        turn = InterviewTurn(question=state.current_question, answer=answer)
+        state.interview_history.append(turn)
+        state.current_question = None
+        state.dossier = dossier
+        state.phase = SessionPhase.GENERATING_MEDIA
+        return state
+
+    @log_stage("session")
     def reset(self, chat_id: int) -> SessionState:
-        """Clear any portrait and return the chat to AWAITING_PHOTO."""
+        """Clear portrait and interview artifacts and return the chat to AWAITING_PHOTO."""
         state = self.get(chat_id)
         state.phase = SessionPhase.AWAITING_PHOTO
         state.portrait = None
+        state.current_question = None
+        state.interview_history = []
+        state.dossier = None
         return state

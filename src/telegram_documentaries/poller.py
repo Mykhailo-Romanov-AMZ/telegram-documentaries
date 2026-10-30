@@ -1,9 +1,16 @@
-"""Telegram long-polling gateway and Bouncer-aware update processor."""
+"""Telegram long-polling gateway and Bouncer + Interviewer update orchestrator."""
 
 from telegram_documentaries.bouncer import DEFAULT_REJECTION_MESSAGE, Bouncer, BouncerError
+from telegram_documentaries.interviewer import (
+    Interviewer,
+    InterviewerError,
+    format_dossier_message,
+)
 from telegram_documentaries.logging_utils import log_stage, logger
 from telegram_documentaries.models import (
     BouncerVerdict,
+    InterviewerTurnResult,
+    InterviewTurn,
     TelegramMessage,
     TelegramPhotoSize,
     TelegramUpdate,
@@ -11,12 +18,18 @@ from telegram_documentaries.models import (
 from telegram_documentaries.session import SessionPhase, SessionStore
 from telegram_documentaries.telegram_client import TelegramClient, TelegramClientError
 
-HARDCODED_REPLY = "hey mate!"
 AWAITING_PHOTO_NUDGE = (
     "Easy there, mate — I need a portrait photo of a human before the documentary begins. "
     "Send one through and I'll take a look."
 )
 ERROR_FALLBACK_MESSAGE = "My binoculars fogged up — send that photo again?"
+INTERVIEW_ERROR_FALLBACK_MESSAGE = (
+    "My field notebook got rained on — could you repeat that answer, mate?"
+)
+INTERVIEW_COMPLETE_NUDGE = (
+    "Field research is already wrapped up, mate! Send /restart if you'd like to begin a "
+    "fresh documentary."
+)
 _RESET_COMMANDS = frozenset({"/start", "/restart"})
 
 
@@ -38,13 +51,30 @@ def _evaluate_bouncer(bouncer: Bouncer, portrait: bytes, chat_id: int) -> Bounce
     return bouncer.evaluate(portrait)
 
 
+@log_stage("interviewer")
+def _start_interviewer(interviewer: Interviewer, portrait: bytes, chat_id: int) -> str:
+    """Run Interviewer.start_interview with chat_id context for structured logging."""
+    return interviewer.start_interview(portrait)
+
+
+@log_stage("interviewer")
+def _advance_interviewer(
+    interviewer: Interviewer,
+    history: list[InterviewTurn],
+    chat_id: int,
+) -> InterviewerTurnResult:
+    """Run Interviewer.advance_interview with chat_id context for structured logging."""
+    return interviewer.advance_interview(history)
+
+
 def _handle_photo(
     message: TelegramMessage,
     client: TelegramClient,
     sessions: SessionStore,
     bouncer: Bouncer,
+    interviewer: Interviewer,
 ) -> None:
-    """Download the largest photo, run the Bouncer, and route on its verdict."""
+    """Download the largest photo, run the Bouncer, and start the interview when human."""
     chat_id = message.chat.id
     photo = _largest_photo(message.photo or [])
 
@@ -66,8 +96,28 @@ def _handle_photo(
         return
 
     if verdict.is_human:
-        sessions.set_portrait(chat_id=chat_id, portrait=portrait)
-        client.send_message(chat_id=chat_id, text=HARDCODED_REPLY)
+        try:
+            first_question = _start_interviewer(
+                interviewer=interviewer,
+                portrait=portrait,
+                chat_id=chat_id,
+            )
+        except InterviewerError as exc:
+            logger.exception(
+                "event=interview_start_failed stage=gateway chat_id=%s error=%s",
+                chat_id,
+                exc,
+            )
+            sessions.reset(chat_id=chat_id)
+            client.send_message(chat_id=chat_id, text=ERROR_FALLBACK_MESSAGE)
+            return
+
+        sessions.start_interview(
+            chat_id=chat_id,
+            portrait=portrait,
+            first_question=first_question,
+        )
+        client.send_message(chat_id=chat_id, text=first_question)
         return
 
     sessions.reset(chat_id=chat_id)
@@ -82,14 +132,74 @@ def _handle_photo(
     client.send_message(chat_id=chat_id, text=rejection)
 
 
+def _handle_interview_text(
+    chat_id: int,
+    text: str,
+    client: TelegramClient,
+    sessions: SessionStore,
+    interviewer: Interviewer,
+) -> None:
+    """Process one user text reply during the INTERVIEWING phase."""
+    state = sessions.get(chat_id)
+    current_question = state.current_question
+    if current_question is None:
+        sessions.reset(chat_id=chat_id)
+        client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
+        return
+
+    cleaned_answer = text.strip()
+    if not cleaned_answer:
+        client.send_message(chat_id=chat_id, text=current_question)
+        return
+
+    pending_history = [
+        *state.interview_history,
+        InterviewTurn(question=current_question, answer=cleaned_answer),
+    ]
+    try:
+        turn_result = _advance_interviewer(
+            interviewer=interviewer,
+            history=pending_history,
+            chat_id=chat_id,
+        )
+    except InterviewerError as exc:
+        logger.exception(
+            "event=interview_turn_failed stage=gateway chat_id=%s error=%s",
+            chat_id,
+            exc,
+        )
+        client.send_message(chat_id=chat_id, text=INTERVIEW_ERROR_FALLBACK_MESSAGE)
+        return
+
+    if turn_result.is_complete and turn_result.dossier is not None:
+        sessions.complete_interview(
+            chat_id=chat_id,
+            answer=cleaned_answer,
+            dossier=turn_result.dossier,
+        )
+        client.send_message(
+            chat_id=chat_id,
+            text=format_dossier_message(turn_result.dossier),
+        )
+        return
+
+    sessions.record_answer(
+        chat_id=chat_id,
+        answer=cleaned_answer,
+        next_question=turn_result.next_question,
+    )
+    client.send_message(chat_id=chat_id, text=turn_result.next_question)
+
+
 @log_stage("gateway")
 def process_update(
     update: TelegramUpdate,
     client: TelegramClient,
     sessions: SessionStore,
     bouncer: Bouncer,
+    interviewer: Interviewer,
 ) -> None:
-    """Route one incoming Telegram update through the vision gate."""
+    """Route one incoming Telegram update through the vision gate and interview state machine."""
     message = update.message
     if message is None:
         logger.debug(
@@ -101,7 +211,13 @@ def process_update(
     chat_id = message.chat.id
 
     if message.photo:
-        _handle_photo(message=message, client=client, sessions=sessions, bouncer=bouncer)
+        _handle_photo(
+            message=message,
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+        )
         return
 
     if message.text is not None:
@@ -109,13 +225,20 @@ def process_update(
             sessions.reset(chat_id=chat_id)
             client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
             return
-        if sessions.get(chat_id).phase == SessionPhase.AWAITING_PHOTO:
+
+        phase = sessions.get(chat_id).phase
+        if phase == SessionPhase.AWAITING_PHOTO:
             client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
-        else:
-            logger.debug(
-                "event=text_ignored stage=gateway chat_id=%s reason=interviewing",
-                chat_id,
+        elif phase == SessionPhase.INTERVIEWING:
+            _handle_interview_text(
+                chat_id=chat_id,
+                text=message.text,
+                client=client,
+                sessions=sessions,
+                interviewer=interviewer,
             )
+        else:
+            client.send_message(chat_id=chat_id, text=INTERVIEW_COMPLETE_NUDGE)
         return
 
     logger.debug(
@@ -129,6 +252,7 @@ def poll_once(
     client: TelegramClient,
     sessions: SessionStore,
     bouncer: Bouncer,
+    interviewer: Interviewer,
     offset: int | None = None,
     timeout: int = 30,
 ) -> int | None:
@@ -146,7 +270,13 @@ def poll_once(
 
     for update in updates:
         try:
-            process_update(update=update, client=client, sessions=sessions, bouncer=bouncer)
+            process_update(
+                update=update,
+                client=client,
+                sessions=sessions,
+                bouncer=bouncer,
+                interviewer=interviewer,
+            )
         except Exception as exc:
             logger.exception(
                 "event=update_processing_failed stage=polling update_id=%s error=%s",
@@ -161,6 +291,7 @@ def run_polling_loop(
     client: TelegramClient,
     sessions: SessionStore,
     bouncer: Bouncer,
+    interviewer: Interviewer,
     timeout: int = 30,
     max_iterations: int | None = None,
 ) -> None:
@@ -173,6 +304,7 @@ def run_polling_loop(
             client=client,
             sessions=sessions,
             bouncer=bouncer,
+            interviewer=interviewer,
             offset=offset,
             timeout=timeout,
         )
