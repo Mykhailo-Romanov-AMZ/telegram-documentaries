@@ -9,12 +9,23 @@ class TelegramChat(BaseModel):
     id: StrictInt
 
 
+class TelegramPhotoSize(BaseModel):
+    """Represents one resolution variant of a photo uploaded to Telegram."""
+
+    file_id: str
+    file_unique_id: str
+    width: StrictInt
+    height: StrictInt
+    file_size: StrictInt | None = None
+
+
 class TelegramMessage(BaseModel):
     """Represents an incoming or outgoing Telegram message."""
 
     message_id: StrictInt
     chat: TelegramChat
     text: str | None = None
+    photo: list[TelegramPhotoSize] | None = None
 
 
 class TelegramUpdate(BaseModel):
@@ -29,6 +40,30 @@ class GetUpdatesResponse(BaseModel):
 
     ok: StrictBool
     result: list[TelegramUpdate] = Field(default_factory=list)
+
+
+class TelegramFile(BaseModel):
+    """Metadata describing a file stored on Telegram's servers."""
+
+    file_id: str
+    file_unique_id: str
+    file_size: StrictInt | None = None
+    file_path: str | None = None
+
+
+class GetFileResponse(BaseModel):
+    """Envelope returned by Telegram's getFile endpoint."""
+
+    ok: StrictBool
+    result: TelegramFile
+
+
+class BouncerVerdict(BaseModel):
+    """Structured verdict returned by the Bouncer vision gate."""
+
+    is_human: StrictBool
+    subject: str
+    rejection_message: str = ""
 
 
 class SendMessageResponse(BaseModel):

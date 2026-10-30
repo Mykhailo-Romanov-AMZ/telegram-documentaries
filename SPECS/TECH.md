@@ -29,11 +29,11 @@
 ## Boundary Contracts & Validation Policy
 - **Untrusted External Inputs:** All incoming Telegram updates, LLM structured outputs, image payloads, and TTS responses are treated as untrusted external data.
 - **Pydantic at the Edge:** Parse and validate all external payloads into typed Pydantic models at system boundaries. Never pass raw dictionaries or unvalidated JSON across internal module boundaries.
-- **Schemas Over Regexes:** Use structured output schemas (Pydantic models) for agent responses (e.g., Bouncer verdict + cheeky reason, Interviewer completion status + dossier + chosen animal) rather than brittle string parsing or regular expressions.
+- **Schemas Over Regexes:** Use structured output schemas (Pydantic models via `google-genai` `response_schema`) for agent responses (e.g., `BouncerVerdict` with `is_human`, `subject`, and `rejection_message`, or Interviewer completion status + dossier + chosen animal) rather than brittle string parsing or regular expressions.
 
 ## Session State & Storage Policy
-- **In-Memory Store:** Maintain a single shared in-memory state driver keyed by `chat_id: int` mapping to a versioned Pydantic `SessionState` model.
-- **Temporary Media Cleanup:** Any temporary files (downloaded user portraits or synthesized audio/image files) must be scoped to the user's session and deleted immediately upon `/start`, `/restart`, Bouncer rejection, or pipeline completion.
+- **In-Memory Store:** Maintain a single shared in-memory `SessionStore` keyed by `chat_id: int` mapping to a Pydantic `SessionState` model (storing the verified portrait as in-memory `bytes` and tracking the current `SessionPhase`).
+- **Temporary Media Cleanup:** In-memory session artifacts (such as stored portrait bytes) and any temporary files (synthesized audio/image files) must be scoped to the user's session and cleared immediately upon `/start`, `/restart`, Bouncer rejection, or pipeline completion.
 
 ## Logging & Error Handling Policy
 - **Structured Logging via Decorators:** Use comprehensive structured logging across pipeline stages and API calls, preferring decorators over cluttering core business logic with repetitive log statements.
