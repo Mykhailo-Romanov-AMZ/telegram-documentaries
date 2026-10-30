@@ -9,6 +9,8 @@ from telegram_documentaries.models import (
     GetUpdatesResponse,
     SendMessagePayload,
     SendMessageResponse,
+    SendPhotoPayload,
+    SendPhotoResponse,
     TelegramFile,
     TelegramMessage,
     TelegramUpdate,
@@ -16,6 +18,7 @@ from telegram_documentaries.models import (
 
 DEFAULT_BASE_URL = "https://api.telegram.org"
 SEND_MESSAGE_TIMEOUT_SECONDS = 15
+SEND_PHOTO_TIMEOUT_SECONDS = 30
 GET_FILE_TIMEOUT_SECONDS = 15
 DOWNLOAD_FILE_TIMEOUT_SECONDS = 30
 
@@ -87,6 +90,41 @@ class TelegramClient:
             )
             response.raise_for_status()
             parsed = SendMessageResponse.model_validate(response.json())
+        except (ValidationError, ValueError):
+            raise TelegramClientError(
+                f"Telegram API {endpoint} returned an invalid response."
+            ) from None
+        except requests.RequestException as exc:
+            raise _endpoint_error(endpoint, exc) from None
+        return parsed.result
+
+    @log_stage("telegram_api")
+    def send_photo(
+        self,
+        chat_id: int,
+        photo_bytes: bytes,
+        caption: str | None = None,
+    ) -> TelegramMessage:
+        """Validate and upload a photo to a Telegram chat via sendPhoto."""
+        endpoint = "sendPhoto"
+        payload = SendPhotoPayload(
+            chat_id=chat_id,
+            photo_bytes=photo_bytes,
+            caption=caption,
+        )
+        form_data: dict[str, int | str] = {"chat_id": payload.chat_id}
+        if payload.caption is not None:
+            form_data["caption"] = payload.caption
+
+        try:
+            response = self._session.post(
+                f"{self._api_base}/{endpoint}",
+                data=form_data,
+                files={"photo": ("hybrid_portrait.png", payload.photo_bytes, "image/png")},
+                timeout=SEND_PHOTO_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            parsed = SendPhotoResponse.model_validate(response.json())
         except (ValidationError, ValueError):
             raise TelegramClientError(
                 f"Telegram API {endpoint} returned an invalid response."

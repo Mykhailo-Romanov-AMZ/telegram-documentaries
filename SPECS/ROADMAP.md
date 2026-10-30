@@ -41,12 +41,13 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 ---
 
 ## Phase 4: The Converter (Hybrid Animal Portrait)
-- **Status:** Pending
+- **Status:** Completed
 - **Goal:** Implement the Converter specialist agent (`gemini-3.1-flash-image-preview`) that fuses the user's original portrait photo and the behavioral dossier into a hybrid animal-human portrait and sends it directly to the user's Telegram chat.
 - **Acceptance Criteria:**
-  - Original user photo and `BehavioralDossier` are passed together to `gemini-3.1-flash-image-preview`.
-  - Generated image bytes are validated and sent directly to the Telegram chat via `sendPhoto`.
-  - No intermediate text-only image description hop is used.
+  - [x] Original user photo and `BehavioralDossier` are passed together to `gemini-3.1-flash-image-preview`.
+  - [x] Generated image bytes are validated and sent directly to the Telegram chat via `sendPhoto`.
+  - [x] No intermediate text-only image description hop is used.
+- **Delivery Summary:** Added strict Pydantic v2 boundary schemas (`GeneratedImage`, `SendPhotoPayload`, `SendPhotoResponse`), extended `SessionState`/`SessionStore` with `hybrid_portrait` (`set_hybrid_portrait`, cleared in `start_interview` and `reset`), implemented `TelegramClient.send_photo` multipart photo upload, created the `Converter` specialist agent (`gemini-3.1-flash-image-preview`, `response_modalities=["IMAGE", "TEXT"]`, `event=converter_portrait_generated` logging), and wired hybrid portrait delivery and retry resilience (`CONVERTER_ERROR_FALLBACK_MESSAGE`) into `poller.py` and `main.py`. 174 tests pass.
 - **Rubric Alignment:** Native multimodal image transformation and delivery to Telegram.
 
 ---

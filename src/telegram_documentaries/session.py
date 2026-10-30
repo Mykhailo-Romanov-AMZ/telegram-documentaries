@@ -25,6 +25,7 @@ class SessionState(BaseModel):
     current_question: str | None = None
     interview_history: list[InterviewTurn] = Field(default_factory=list)
     dossier: BehavioralDossier | None = None
+    hybrid_portrait: bytes | None = None
 
 
 class SessionStore:
@@ -66,6 +67,7 @@ class SessionStore:
         state.current_question = cleaned_question
         state.interview_history = []
         state.dossier = None
+        state.hybrid_portrait = None
         return state
 
     @log_stage("session")
@@ -107,6 +109,15 @@ class SessionStore:
         return state
 
     @log_stage("session")
+    def set_hybrid_portrait(self, chat_id: int, hybrid_portrait: bytes) -> SessionState:
+        """Store the synthesized hybrid animal portrait bytes for a chat."""
+        if not hybrid_portrait:
+            raise ValueError("hybrid_portrait must not be empty.")
+        state = self.get(chat_id)
+        state.hybrid_portrait = hybrid_portrait
+        return state
+
+    @log_stage("session")
     def reset(self, chat_id: int) -> SessionState:
         """Clear portrait and interview artifacts and return the chat to AWAITING_PHOTO."""
         state = self.get(chat_id)
@@ -115,4 +126,5 @@ class SessionStore:
         state.current_question = None
         state.interview_history = []
         state.dossier = None
+        state.hybrid_portrait = None
         return state

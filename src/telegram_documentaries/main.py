@@ -2,6 +2,7 @@
 
 from telegram_documentaries.bouncer import Bouncer
 from telegram_documentaries.config import load_settings
+from telegram_documentaries.converter import Converter
 from telegram_documentaries.interviewer import Interviewer
 from telegram_documentaries.logging_utils import configure_logging
 from telegram_documentaries.poller import run_polling_loop
@@ -17,11 +18,13 @@ def main() -> None:
     sessions = SessionStore()
     bouncer = Bouncer(api_key=settings.gemini_api_key)
     interviewer = Interviewer(api_key=settings.gemini_api_key)
+    converter = Converter(api_key=settings.gemini_api_key)
     run_polling_loop(
         client=client,
         sessions=sessions,
         bouncer=bouncer,
         interviewer=interviewer,
+        converter=converter,
     )
 
 

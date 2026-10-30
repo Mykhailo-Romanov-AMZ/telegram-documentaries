@@ -8,9 +8,12 @@ from pydantic import ValidationError
 from telegram_documentaries.models import (
     BehavioralDossier,
     BouncerVerdict,
+    GeneratedImage,
     GetFileResponse,
     InterviewerTurnResult,
     InterviewTurn,
+    SendPhotoPayload,
+    SendPhotoResponse,
     TelegramFile,
     TelegramPhotoSize,
     TelegramUpdate,
@@ -288,5 +291,101 @@ def test_interviewer_turn_result_rejects_non_bool_is_complete(non_bool: Any) -> 
             {
                 "is_complete": non_bool,
                 "next_question": "Another question?",
+            }
+        )
+
+
+def test_generated_image_accepts_non_empty_bytes_and_valid_image_mime_types() -> None:
+    """GeneratedImage accepts non-empty bytes and defaults or normalizes image/* MIME types."""
+    default_img = GeneratedImage(image_bytes=b"\x89PNG\r\n\x1a\n")
+    assert default_img.image_bytes == b"\x89PNG\r\n\x1a\n"
+    assert default_img.mime_type == "image/png"
+
+    jpeg_img = GeneratedImage(image_bytes=b"\xff\xd8\xff\xe0", mime_type="  image/jpeg  ")
+    assert jpeg_img.image_bytes == b"\xff\xd8\xff\xe0"
+    assert jpeg_img.mime_type == "image/jpeg"
+
+
+@pytest.mark.parametrize("invalid_mime", ["", "   ", "text/plain", "application/json", "image/"])
+def test_generated_image_rejects_empty_bytes_or_non_image_mime_type(invalid_mime: str) -> None:
+    """GeneratedImage rejects empty image_bytes or non-image/* mime_type values."""
+    with pytest.raises(ValidationError):
+        GeneratedImage(image_bytes=b"", mime_type="image/png")
+
+    with pytest.raises(ValidationError):
+        GeneratedImage(image_bytes=b"\x89PNG", mime_type=invalid_mime)
+
+
+def test_send_photo_payload_validates_chat_id_photo_bytes_and_optional_caption() -> None:
+    """SendPhotoPayload accepts valid StrictInt chat_id, non-empty photo_bytes, and caption."""
+    without_caption = SendPhotoPayload(chat_id=12345, photo_bytes=b"\x89PNG-bytes")
+    assert without_caption.chat_id == 12345
+    assert without_caption.photo_bytes == b"\x89PNG-bytes"
+    assert without_caption.caption is None
+
+    with_caption = SendPhotoPayload(
+        chat_id=12345,
+        photo_bytes=b"\x89PNG-bytes",
+        caption="  Behold the Eurasian Badger!  ",
+    )
+    assert with_caption.caption == "Behold the Eurasian Badger!"
+
+
+@pytest.mark.parametrize("blank_caption", ["", "   ", "\t\n"])
+def test_send_photo_payload_rejects_invalid_chat_id_empty_bytes_or_blank_caption(
+    blank_caption: str,
+) -> None:
+    """SendPhotoPayload rejects non-int chat_id, empty photo_bytes, or blank caption."""
+    with pytest.raises(ValidationError):
+        SendPhotoPayload.model_validate({"chat_id": "12345", "photo_bytes": b"\x89PNG"})
+
+    with pytest.raises(ValidationError):
+        SendPhotoPayload.model_validate({"chat_id": True, "photo_bytes": b"\x89PNG"})
+
+    with pytest.raises(ValidationError):
+        SendPhotoPayload(chat_id=12345, photo_bytes=b"")
+
+    with pytest.raises(ValidationError):
+        SendPhotoPayload(chat_id=12345, photo_bytes=b"\x89PNG", caption=blank_caption)
+
+
+def test_send_photo_response_parses_valid_envelope_and_rejects_malformed() -> None:
+    """SendPhotoResponse validates the sendPhoto response envelope and rejects bad types."""
+    parsed = SendPhotoResponse.model_validate(
+        {
+            "ok": True,
+            "result": {
+                "message_id": 77,
+                "chat": {"id": 12345},
+                "photo": [
+                    {
+                        "file_id": "hybrid-id",
+                        "file_unique_id": "u-hybrid-id",
+                        "width": 1024,
+                        "height": 1024,
+                    }
+                ],
+            },
+        }
+    )
+    assert parsed.ok is True
+    assert parsed.result.message_id == 77
+    assert parsed.result.chat.id == 12345
+    assert parsed.result.photo is not None
+    assert parsed.result.photo[0].file_id == "hybrid-id"
+
+    with pytest.raises(ValidationError):
+        SendPhotoResponse.model_validate(
+            {
+                "ok": "true",
+                "result": {"message_id": 77, "chat": {"id": 12345}},
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        SendPhotoResponse.model_validate(
+            {
+                "ok": True,
+                "result": {"message_id": "not-an-int", "chat": {"id": 12345}},
             }
         )

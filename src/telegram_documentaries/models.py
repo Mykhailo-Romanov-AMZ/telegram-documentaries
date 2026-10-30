@@ -176,3 +176,57 @@ class SendMessagePayload(BaseModel):
         if not value.strip():
             raise ValueError("Message text must not be empty.")
         return value
+
+
+class GeneratedImage(BaseModel):
+    """Validated image bytes and MIME type returned by the Converter model."""
+
+    image_bytes: bytes
+    mime_type: str = "image/png"
+
+    @field_validator("image_bytes")
+    @classmethod
+    def validate_non_empty_bytes(cls, value: bytes) -> bytes:
+        if not value:
+            raise ValueError("GeneratedImage image_bytes must not be empty.")
+        return value
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_image_mime_type(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not cleaned.startswith("image/") or len(cleaned) <= len("image/"):
+            raise ValueError("GeneratedImage mime_type must be a non-empty 'image/*' MIME type.")
+        return cleaned
+
+
+class SendPhotoPayload(BaseModel):
+    """Validated outgoing payload for Telegram's sendPhoto endpoint."""
+
+    chat_id: StrictInt
+    photo_bytes: bytes
+    caption: str | None = None
+
+    @field_validator("photo_bytes")
+    @classmethod
+    def validate_non_empty_photo_bytes(cls, value: bytes) -> bytes:
+        if not value:
+            raise ValueError("Photo bytes must not be empty.")
+        return value
+
+    @field_validator("caption")
+    @classmethod
+    def validate_optional_caption(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Photo caption must not be empty or whitespace-only when provided.")
+        return cleaned
+
+
+class SendPhotoResponse(BaseModel):
+    """Envelope returned by Telegram's sendPhoto endpoint."""
+
+    ok: StrictBool
+    result: TelegramMessage
