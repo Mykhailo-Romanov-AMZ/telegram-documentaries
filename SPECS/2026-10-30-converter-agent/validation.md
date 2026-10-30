@@ -18,7 +18,7 @@
 - [x] `/start` and `/restart` wipe `portrait`, `current_question`, `interview_history`, `dossier`, and `hybrid_portrait` from any phase.
 
 ## Live Verification (User on Phone)
-- [ ] Upload a human portrait and complete the 5–7 question interview in Telegram → confirm the bot automatically transitions from the final question to returning an animal hybrid portrait image in the chat.
+- [x] Upload a human portrait and complete the 5–7 question interview in Telegram → confirm the bot automatically transitions from the final question to returning an animal hybrid portrait image in the chat.
 
 ## Documentation Synchronisation
 - [x] `SPECS/ROADMAP.md` Phase 4 marked **Completed** with delivery summary.

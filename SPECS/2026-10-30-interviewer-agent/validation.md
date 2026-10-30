@@ -20,8 +20,8 @@
 - [x] `/start` and `/restart` wipe `portrait`, `current_question`, `interview_history`, and `dossier` from any phase.
 
 ## Live Verification (User on Phone)
-- [ ] Upload a human portrait → bot replies with Question 1 from the Interviewer *(pending live user phone test)*.
-- [ ] Reply turn-by-turn to 5–7 questions → bot asks one question at a time and then outputs the behavioral dossier summary + suggested spirit animal *(pending live user phone test)*.
+- [x] Upload a human portrait → bot replies with Question 1 from the Interviewer.
+- [x] Reply turn-by-turn to 5–7 questions → bot asks one question at a time and then outputs the behavioral dossier summary + suggested spirit animal.
 
 ## Documentation Synchronisation
 - [x] `SPECS/ROADMAP.md` Phase 3 marked **Completed** with delivery summary.
