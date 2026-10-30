@@ -18,6 +18,7 @@ from telegram_documentaries.models import (
 )
 from telegram_documentaries.telegram_client import (
     SEND_PHOTO_TIMEOUT_SECONDS,
+    SEND_VOICE_TIMEOUT_SECONDS,
     TelegramClient,
     TelegramClientError,
 )
@@ -327,6 +328,7 @@ def test_telegram_client_reports_json_decode_error_as_invalid_response() -> None
         ("get_updates", "get", "getUpdates"),
         ("send_message", "post", "sendMessage"),
         ("send_photo", "post", "sendPhoto"),
+        ("send_voice", "post", "sendVoice"),
         ("get_file", "get", "getFile"),
         ("download_file", "get", "download_file"),
     ],
@@ -357,6 +359,8 @@ def test_telegram_client_errors_never_leak_bot_token(
             client.send_message(chat_id=123, text="hey mate!")
         elif method_name == "send_photo":
             client.send_photo(chat_id=123, photo_bytes=b"\x89PNG-bytes")
+        elif method_name == "send_voice":
+            client.send_voice(chat_id=123, audio_bytes=b"ID3-voice-bytes")
         elif method_name == "get_file":
             client.get_file(file_id="photo-file-id")
         else:
@@ -463,4 +467,97 @@ def test_telegram_client_send_photo_wraps_invalid_response_envelope() -> None:
 
     assert exc_info.value.__cause__ is None
     assert "sendPhoto" in str(exc_info.value)
+    assert "invalid response" in str(exc_info.value)
+
+
+def test_telegram_client_send_voice_posts_multipart_and_returns_validated_message() -> None:
+    """send_voice uploads multipart audio bytes to sendVoice and returns a TelegramMessage."""
+    assert SEND_VOICE_TIMEOUT_SECONDS == 30
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {
+        "ok": True,
+        "result": {
+            "message_id": 92,
+            "chat": {"id": 12345},
+        },
+    }
+    mock_session.post.return_value = mock_response
+    audio_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x00narration-bytes"
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    sent = client.send_voice(chat_id=12345, audio_bytes=audio_bytes)
+
+    assert isinstance(sent, TelegramMessage)
+    assert sent.message_id == 92
+    assert sent.chat.id == 12345
+
+    mock_session.post.assert_called_once_with(
+        "https://api.telegram.org/bottest-token-123/sendVoice",
+        data={"chat_id": 12345},
+        files={"voice": ("narration.mp3", audio_bytes, "audio/mpeg")},
+        timeout=SEND_VOICE_TIMEOUT_SECONDS,
+    )
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_telegram_client_send_voice_supports_custom_filename_mime_type_and_caption() -> None:
+    """send_voice passes custom filename, mime_type, and stripped caption when provided."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {
+        "ok": True,
+        "result": {
+            "message_id": 93,
+            "chat": {"id": 12345},
+        },
+    }
+    mock_session.post.return_value = mock_response
+    audio_bytes = b"OggS-voice-bytes"
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    client.send_voice(
+        chat_id=12345,
+        audio_bytes=audio_bytes,
+        filename="drozdov.ogg",
+        mime_type="audio/ogg",
+        caption="  In the World of Animals  ",
+    )
+
+    mock_session.post.assert_called_once_with(
+        "https://api.telegram.org/bottest-token-123/sendVoice",
+        data={"chat_id": 12345, "caption": "In the World of Animals"},
+        files={"voice": ("drozdov.ogg", audio_bytes, "audio/ogg")},
+        timeout=SEND_VOICE_TIMEOUT_SECONDS,
+    )
+
+
+def test_telegram_client_send_voice_raises_telegram_client_error_on_invalid_inputs() -> None:
+    """send_voice raises TelegramClientError on empty audio_bytes or non-StrictInt chat_id."""
+    mock_session = MagicMock(spec=requests.Session)
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError):
+        client.send_voice(chat_id=12345, audio_bytes=b"")
+
+    with pytest.raises(TelegramClientError):
+        client.send_voice(chat_id=True, audio_bytes=b"ID3")
+
+    mock_session.post.assert_not_called()
+
+
+def test_telegram_client_send_voice_wraps_invalid_response_envelope() -> None:
+    """send_voice raises TelegramClientError when Telegram returns malformed JSON or schema."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {"ok": True, "result": {"bad": "shape"}}
+    mock_session.post.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError) as exc_info:
+        client.send_voice(chat_id=12345, audio_bytes=b"ID3-bytes")
+
+    assert exc_info.value.__cause__ is None
+    assert "sendVoice" in str(exc_info.value)
     assert "invalid response" in str(exc_info.value)

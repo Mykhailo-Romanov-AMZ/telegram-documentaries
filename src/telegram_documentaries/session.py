@@ -14,6 +14,7 @@ class SessionPhase(StrEnum):
     AWAITING_PHOTO = "awaiting_photo"
     INTERVIEWING = "interviewing"
     GENERATING_MEDIA = "generating_media"
+    COMPLETED = "completed"
 
 
 class SessionState(BaseModel):
@@ -127,6 +128,13 @@ class SessionStore:
             raise ValueError("script must not be empty.")
         state = self.get(chat_id)
         state.script = cleaned
+        return state
+
+    @log_stage("session")
+    def complete_documentary(self, chat_id: int) -> SessionState:
+        """Transition a chat session to COMPLETED after voice narration delivery."""
+        state = self.get(chat_id)
+        state.phase = SessionPhase.COMPLETED
         return state
 
     @log_stage("session")

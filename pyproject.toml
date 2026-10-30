@@ -9,6 +9,7 @@ description = "Interactive Telegram bot producing nature documentary narrations 
 requires-python = ">=3.11"
 dependencies = [
     "google-genai>=2.0",
+    "lameenc>=1.7.0",
     "pydantic>=2.0",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
@@ -45,3 +46,7 @@ warn_return_any = true
 warn_unused_configs = true
 mypy_path = "src"
 packages = ["telegram_documentaries", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["lameenc"]
+ignore_missing_imports = true

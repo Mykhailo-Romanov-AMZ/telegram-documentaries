@@ -11,6 +11,8 @@ from telegram_documentaries.models import (
     SendMessageResponse,
     SendPhotoPayload,
     SendPhotoResponse,
+    SendVoicePayload,
+    SendVoiceResponse,
     TelegramFile,
     TelegramMessage,
     TelegramUpdate,
@@ -19,6 +21,7 @@ from telegram_documentaries.models import (
 DEFAULT_BASE_URL = "https://api.telegram.org"
 SEND_MESSAGE_TIMEOUT_SECONDS = 15
 SEND_PHOTO_TIMEOUT_SECONDS = 30
+SEND_VOICE_TIMEOUT_SECONDS = 30
 GET_FILE_TIMEOUT_SECONDS = 15
 DOWNLOAD_FILE_TIMEOUT_SECONDS = 30
 
@@ -125,6 +128,43 @@ class TelegramClient:
             )
             response.raise_for_status()
             parsed = SendPhotoResponse.model_validate(response.json())
+        except (ValidationError, ValueError):
+            raise TelegramClientError(
+                f"Telegram API {endpoint} returned an invalid response."
+            ) from None
+        except requests.RequestException as exc:
+            raise _endpoint_error(endpoint, exc) from None
+        return parsed.result
+
+    @log_stage("telegram_api")
+    def send_voice(
+        self,
+        chat_id: int,
+        audio_bytes: bytes,
+        filename: str = "narration.mp3",
+        mime_type: str = "audio/mpeg",
+        caption: str | None = None,
+    ) -> TelegramMessage:
+        """Validate and upload a voice/audio narration to a Telegram chat via sendVoice."""
+        endpoint = "sendVoice"
+        try:
+            payload = SendVoicePayload(
+                chat_id=chat_id,
+                audio_bytes=audio_bytes,
+                caption=caption,
+            )
+            form_data: dict[str, int | str] = {"chat_id": payload.chat_id}
+            if payload.caption is not None:
+                form_data["caption"] = payload.caption
+
+            response = self._session.post(
+                f"{self._api_base}/{endpoint}",
+                data=form_data,
+                files={"voice": (filename, payload.audio_bytes, mime_type)},
+                timeout=SEND_VOICE_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            parsed = SendVoiceResponse.model_validate(response.json())
         except (ValidationError, ValueError):
             raise TelegramClientError(
                 f"Telegram API {endpoint} returned an invalid response."

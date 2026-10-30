@@ -1,6 +1,6 @@
-"""Telegram long-polling gateway and Bouncer + Interviewer + Converter + Scripter orchestrator.
+"""Telegram long-polling gateway and multimodal documentary stage orchestrator.
 
-Routes incoming updates through the vision gate, interview, converter, and scripter stages.
+Routes incoming updates through the vision gate, interview, converter, scripter, and narrator.
 """
 
 from telegram_documentaries.bouncer import DEFAULT_REJECTION_MESSAGE, Bouncer, BouncerError
@@ -19,6 +19,7 @@ from telegram_documentaries.models import (
     TelegramPhotoSize,
     TelegramUpdate,
 )
+from telegram_documentaries.narrator import Narrator, NarratorError
 from telegram_documentaries.scripter import Scripter, ScripterError
 from telegram_documentaries.session import SessionPhase, SessionStore
 from telegram_documentaries.telegram_client import TelegramClient, TelegramClientError
@@ -38,6 +39,10 @@ CONVERTER_ERROR_FALLBACK_MESSAGE = (
 SCRIPTER_ERROR_FALLBACK_MESSAGE = (
     "My typewriter ribbon snapped mid-narration — send any message to retry your "
     "documentary script, or /restart to begin anew!"
+)
+NARRATOR_ERROR_FALLBACK_MESSAGE = (
+    "My field microphone crackled out — send any message to retry recording your voiceover, "
+    "or /restart to begin anew!"
 )
 INTERVIEW_COMPLETE_NUDGE = (
     "Field research is already wrapped up, mate! Send /restart if you'd like to begin a "
@@ -101,14 +106,70 @@ def _generate_script(
     return scripter.generate_script(dossier)
 
 
+@log_stage("narrator")
+def _synthesize_and_send_voice(
+    narrator: Narrator,
+    client: TelegramClient,
+    script: str,
+    chat_id: int,
+) -> None:
+    """Synthesize speech to a temporary audio file and upload it via sendVoice with chat_id."""
+    with narrator.synthesize_to_temp_file(script) as audio_path:
+        audio_bytes = audio_path.read_bytes()
+        if audio_path.suffix == ".ogg":
+            client.send_voice(
+                chat_id=chat_id,
+                audio_bytes=audio_bytes,
+                filename="narration.ogg",
+                mime_type="audio/ogg",
+            )
+        else:
+            client.send_voice(chat_id=chat_id, audio_bytes=audio_bytes)
+
+
+def _deliver_voice_narration(
+    chat_id: int,
+    script: str,
+    client: TelegramClient,
+    sessions: SessionStore,
+    narrator: Narrator,
+) -> None:
+    """Synthesize and upload voice narration via a temporary file, then complete the documentary."""
+    try:
+        _synthesize_and_send_voice(
+            narrator=narrator,
+            client=client,
+            script=script,
+            chat_id=chat_id,
+        )
+    except (NarratorError, TelegramClientError) as exc:
+        logger.exception(
+            "event=narrator_failed stage=gateway chat_id=%s error=%s",
+            chat_id,
+            exc,
+        )
+        try:
+            client.send_message(chat_id=chat_id, text=NARRATOR_ERROR_FALLBACK_MESSAGE)
+        except TelegramClientError as fallback_exc:
+            logger.exception(
+                "event=narrator_fallback_failed stage=gateway chat_id=%s error=%s",
+                chat_id,
+                fallback_exc,
+            )
+        return
+
+    sessions.complete_documentary(chat_id=chat_id)
+
+
 def _deliver_script(
     chat_id: int,
     dossier: BehavioralDossier,
     client: TelegramClient,
     sessions: SessionStore,
     scripter: Scripter,
+    narrator: Narrator,
 ) -> None:
-    """Generate and send the documentary narration script, or send fallback preserving portrait."""
+    """Generate and send the documentary narration script, then deliver the voice narration."""
     try:
         script = _generate_script(scripter=scripter, dossier=dossier, chat_id=chat_id)
         client.send_message(chat_id=chat_id, text=script)
@@ -129,6 +190,13 @@ def _deliver_script(
         return
 
     sessions.set_script(chat_id=chat_id, script=script)
+    _deliver_voice_narration(
+        chat_id=chat_id,
+        script=script,
+        client=client,
+        sessions=sessions,
+        narrator=narrator,
+    )
 
 
 def _deliver_hybrid_portrait(
@@ -139,8 +207,9 @@ def _deliver_hybrid_portrait(
     sessions: SessionStore,
     converter: Converter,
     scripter: Scripter,
+    narrator: Narrator,
 ) -> None:
-    """Synthesize and send the hybrid animal portrait, then deliver the narration script."""
+    """Synthesize and send the hybrid animal portrait, then deliver script and voice narration."""
     try:
         hybrid_bytes = _generate_hybrid_portrait(
             converter=converter,
@@ -165,6 +234,7 @@ def _deliver_hybrid_portrait(
         client=client,
         sessions=sessions,
         scripter=scripter,
+        narrator=narrator,
     )
 
 
@@ -241,6 +311,7 @@ def _handle_interview_text(
     interviewer: Interviewer,
     converter: Converter,
     scripter: Scripter,
+    narrator: Narrator,
 ) -> None:
     """Process one user text reply during the INTERVIEWING phase."""
     state = sessions.get(chat_id)
@@ -289,6 +360,7 @@ def _handle_interview_text(
             sessions=sessions,
             converter=converter,
             scripter=scripter,
+            narrator=narrator,
         )
         return
 
@@ -306,8 +378,9 @@ def _handle_generating_media_text(
     sessions: SessionStore,
     converter: Converter,
     scripter: Scripter,
+    narrator: Narrator,
 ) -> None:
-    """Handle retries in GENERATING_MEDIA based on whether portrait/script are present."""
+    """Handle stage-aware retries in GENERATING_MEDIA based on stored artifacts."""
     state = sessions.get(chat_id)
     if state.hybrid_portrait is None and state.portrait is not None and state.dossier is not None:
         _deliver_hybrid_portrait(
@@ -318,6 +391,7 @@ def _handle_generating_media_text(
             sessions=sessions,
             converter=converter,
             scripter=scripter,
+            narrator=narrator,
         )
         return
 
@@ -328,6 +402,17 @@ def _handle_generating_media_text(
             client=client,
             sessions=sessions,
             scripter=scripter,
+            narrator=narrator,
+        )
+        return
+
+    if state.hybrid_portrait is not None and state.script is not None:
+        _deliver_voice_narration(
+            chat_id=chat_id,
+            script=state.script,
+            client=client,
+            sessions=sessions,
+            narrator=narrator,
         )
         return
 
@@ -343,6 +428,7 @@ def process_update(
     interviewer: Interviewer,
     converter: Converter,
     scripter: Scripter,
+    narrator: Narrator,
 ) -> None:
     """Route one incoming Telegram update through the vision gate and interview state machine."""
     message = update.message
@@ -383,15 +469,19 @@ def process_update(
                 interviewer=interviewer,
                 converter=converter,
                 scripter=scripter,
+                narrator=narrator,
             )
-        else:
+        elif phase == SessionPhase.GENERATING_MEDIA:
             _handle_generating_media_text(
                 chat_id=chat_id,
                 client=client,
                 sessions=sessions,
                 converter=converter,
                 scripter=scripter,
+                narrator=narrator,
             )
+        else:
+            client.send_message(chat_id=chat_id, text=INTERVIEW_COMPLETE_NUDGE)
         return
 
     logger.debug(
@@ -408,6 +498,7 @@ def poll_once(
     interviewer: Interviewer,
     converter: Converter,
     scripter: Scripter,
+    narrator: Narrator,
     offset: int | None = None,
     timeout: int = 30,
 ) -> int | None:
@@ -433,6 +524,7 @@ def poll_once(
                 interviewer=interviewer,
                 converter=converter,
                 scripter=scripter,
+                narrator=narrator,
             )
         except Exception as exc:
             logger.exception(
@@ -451,6 +543,7 @@ def run_polling_loop(
     interviewer: Interviewer,
     converter: Converter,
     scripter: Scripter,
+    narrator: Narrator,
     timeout: int = 30,
     max_iterations: int | None = None,
 ) -> None:
@@ -466,6 +559,7 @@ def run_polling_loop(
             interviewer=interviewer,
             converter=converter,
             scripter=scripter,
+            narrator=narrator,
             offset=offset,
             timeout=timeout,
         )
