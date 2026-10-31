@@ -87,10 +87,11 @@ def test_two_chat_ids_are_fully_isolated() -> None:
 
 
 def test_session_phase_includes_generating_media() -> None:
-    """SessionPhase defines AWAITING_PHOTO, INTERVIEWING, and GENERATING_MEDIA."""
+    """SessionPhase defines AWAITING_PHOTO, INTERVIEWING, GENERATING_MEDIA, and COMPLETED."""
     assert SessionPhase.AWAITING_PHOTO.value == "awaiting_photo"
     assert SessionPhase.INTERVIEWING.value == "interviewing"
     assert SessionPhase.GENERATING_MEDIA.value == "generating_media"
+    assert SessionPhase.COMPLETED.value == "completed"
 
 
 def test_start_interview_sets_portrait_first_question_and_clears_prior_interview_state() -> None:
@@ -308,3 +309,68 @@ def test_two_chat_ids_never_share_script() -> None:
 
     assert store.get(chat_id=1001).script == "Chat A documentary narration."
     assert store.get(chat_id=2002).script is None
+
+
+def test_complete_documentary_transitions_chat_to_completed_with_chat_isolation() -> None:
+    """complete_documentary sets phase to COMPLETED while keeping other chats isolated."""
+    store = SessionStore()
+    dossier = BehavioralDossier(
+        summary="Nocturnal snacker with a fondness for warm burrows.",
+        suggested_animal="Eurasian Badger",
+    )
+    store.start_interview(chat_id=1001, portrait=b"portrait-a", first_question="Q1?")
+    store.complete_interview(chat_id=1001, answer="A1", dossier=dossier)
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-hybrid")
+    store.set_script(chat_id=1001, script="Here in the midnight kitchen...")
+    store.start_interview(chat_id=2002, portrait=b"portrait-b", first_question="Chat B Q1?")
+
+    state = store.complete_documentary(chat_id=1001)
+
+    assert state.phase == SessionPhase.COMPLETED
+    assert store.get(chat_id=1001).phase == SessionPhase.COMPLETED
+    assert store.get(chat_id=1001).hybrid_portrait == b"\x89PNG-hybrid"
+    assert store.get(chat_id=1001).script == "Here in the midnight kitchen..."
+    assert store.get(chat_id=2002).phase == SessionPhase.INTERVIEWING
+
+
+def test_start_interview_and_reset_transition_completed_session_and_clear_artifacts() -> None:
+    """Both start_interview and reset transition a COMPLETED session and clear prior artifacts."""
+    store = SessionStore()
+    dossier = BehavioralDossier(
+        summary="Prior dossier.",
+        suggested_animal="Eurasian Badger",
+    )
+    store.start_interview(chat_id=1001, portrait=b"old-portrait", first_question="Old Q1?")
+    store.complete_interview(chat_id=1001, answer="Old A1", dossier=dossier)
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-old")
+    store.set_script(chat_id=1001, script="Old script.")
+    store.complete_documentary(chat_id=1001)
+    assert store.get(chat_id=1001).phase == SessionPhase.COMPLETED
+
+    restarted = store.start_interview(
+        chat_id=1001,
+        portrait=b"new-portrait",
+        first_question="New Q1?",
+    )
+    assert restarted.phase == SessionPhase.INTERVIEWING
+    assert restarted.portrait == b"new-portrait"
+    assert restarted.current_question == "New Q1?"
+    assert restarted.interview_history == []
+    assert restarted.dossier is None
+    assert restarted.hybrid_portrait is None
+    assert restarted.script is None
+
+    store.complete_interview(chat_id=1001, answer="New A1", dossier=dossier)
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-new")
+    store.set_script(chat_id=1001, script="New script.")
+    store.complete_documentary(chat_id=1001)
+    assert store.get(chat_id=1001).phase == SessionPhase.COMPLETED
+
+    after_reset = store.reset(chat_id=1001)
+    assert after_reset.phase == SessionPhase.AWAITING_PHOTO
+    assert after_reset.portrait is None
+    assert after_reset.current_question is None
+    assert after_reset.interview_history == []
+    assert after_reset.dossier is None
+    assert after_reset.hybrid_portrait is None
+    assert after_reset.script is None

@@ -9,12 +9,15 @@ from telegram_documentaries.models import (
     BehavioralDossier,
     BouncerVerdict,
     DocumentaryScript,
+    GeneratedAudio,
     GeneratedImage,
     GetFileResponse,
     InterviewerTurnResult,
     InterviewTurn,
     SendPhotoPayload,
     SendPhotoResponse,
+    SendVoicePayload,
+    SendVoiceResponse,
     TelegramFile,
     TelegramPhotoSize,
     TelegramUpdate,
@@ -454,3 +457,92 @@ def test_documentary_script_rejects_marker_only_narration(marker_only: str) -> N
     """Narration made only of markdown markers is rejected as empty."""
     with pytest.raises(ValidationError):
         DocumentaryScript(narration=marker_only)
+
+
+def test_generated_audio_accepts_non_empty_bytes_and_normalizes_audio_mime_types() -> None:
+    """GeneratedAudio accepts non-empty bytes and defaults or normalizes audio/* MIME types."""
+    default_audio = GeneratedAudio(audio_bytes=b"ID3\x04\x00\x00\x00\x00\x00\x00")
+    assert default_audio.audio_bytes == b"ID3\x04\x00\x00\x00\x00\x00\x00"
+    assert default_audio.mime_type == "audio/mpeg"
+
+    pcm_audio = GeneratedAudio(
+        audio_bytes=b"\x01\x02\x03\x04",
+        mime_type="  audio/L16;rate=24000  ",
+    )
+    assert pcm_audio.audio_bytes == b"\x01\x02\x03\x04"
+    assert pcm_audio.mime_type == "audio/l16;rate=24000"
+
+
+@pytest.mark.parametrize("invalid_mime", ["", "   ", "text/plain", "image/png", "audio/"])
+def test_generated_audio_rejects_empty_bytes_or_non_audio_mime_type(invalid_mime: str) -> None:
+    """GeneratedAudio rejects empty audio_bytes or non-audio/* mime_type values."""
+    with pytest.raises(ValidationError):
+        GeneratedAudio(audio_bytes=b"", mime_type="audio/mpeg")
+
+    with pytest.raises(ValidationError):
+        GeneratedAudio(audio_bytes=b"ID3", mime_type=invalid_mime)
+
+
+def test_send_voice_payload_validates_chat_id_audio_bytes_and_optional_caption() -> None:
+    """SendVoicePayload accepts valid StrictInt chat_id, non-empty audio_bytes, and caption."""
+    without_caption = SendVoicePayload(chat_id=12345, audio_bytes=b"ID3-audio-bytes")
+    assert without_caption.chat_id == 12345
+    assert without_caption.audio_bytes == b"ID3-audio-bytes"
+    assert without_caption.caption is None
+
+    with_caption = SendVoicePayload(
+        chat_id=12345,
+        audio_bytes=b"ID3-audio-bytes",
+        caption="  Field Narration  ",
+    )
+    assert with_caption.caption == "Field Narration"
+
+
+@pytest.mark.parametrize("blank_caption", ["", "   ", "\t\n"])
+def test_send_voice_payload_rejects_invalid_chat_id_empty_bytes_or_blank_caption(
+    blank_caption: str,
+) -> None:
+    """SendVoicePayload rejects non-int chat_id, empty audio_bytes, or blank caption."""
+    with pytest.raises(ValidationError):
+        SendVoicePayload.model_validate({"chat_id": "12345", "audio_bytes": b"ID3"})
+
+    with pytest.raises(ValidationError):
+        SendVoicePayload.model_validate({"chat_id": True, "audio_bytes": b"ID3"})
+
+    with pytest.raises(ValidationError):
+        SendVoicePayload(chat_id=12345, audio_bytes=b"")
+
+    with pytest.raises(ValidationError):
+        SendVoicePayload(chat_id=12345, audio_bytes=b"ID3", caption=blank_caption)
+
+
+def test_send_voice_response_parses_valid_envelope_and_rejects_malformed() -> None:
+    """SendVoiceResponse validates the sendVoice response envelope and rejects bad types."""
+    parsed = SendVoiceResponse.model_validate(
+        {
+            "ok": True,
+            "result": {
+                "message_id": 91,
+                "chat": {"id": 12345},
+            },
+        }
+    )
+    assert parsed.ok is True
+    assert parsed.result.message_id == 91
+    assert parsed.result.chat.id == 12345
+
+    with pytest.raises(ValidationError):
+        SendVoiceResponse.model_validate(
+            {
+                "ok": "true",
+                "result": {"message_id": 91, "chat": {"id": 12345}},
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        SendVoiceResponse.model_validate(
+            {
+                "ok": True,
+                "result": {"message_id": "not-an-int", "chat": {"id": 12345}},
+            }
+        )

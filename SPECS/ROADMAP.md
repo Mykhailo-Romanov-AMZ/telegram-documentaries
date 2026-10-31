@@ -64,12 +64,13 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 ---
 
 ## Phase 6: The Narrator (Gemini TTS Audio Synthesis)
-- **Status:** Pending
+- **Status:** Completed
 - **Goal:** Implement the Narrator TTS execution tool using `gemini-3.1-flash-tts-preview` to synthesize the Scripter's paragraph into a Telegram-compatible audio format (OGG/MP3) and deliver it to the chat.
 - **Acceptance Criteria:**
-  - Deterministic tool (not an autonomous agent) sends the script text to `gemini-3.1-flash-tts-preview`.
-  - Converts/packages the returned audio into a valid OGG/MP3 payload and delivers it to Telegram via `sendVoice` or `sendAudio`.
-  - Transitions session state to `COMPLETED` and cleans up temporary media files.
+  - [x] Deterministic tool (not an autonomous agent) sends the script text to `gemini-3.1-flash-tts-preview`.
+  - [x] Converts/packages the returned audio into a valid OGG/MP3 payload and delivers it to Telegram via `sendVoice` or `sendAudio`.
+  - [x] Transitions session state to `COMPLETED` and cleans up temporary media files.
+- **Delivery Summary:** Added strict Pydantic v2 boundary schemas (`GeneratedAudio`, `SendVoicePayload`, `SendVoiceResponse`), extended `SessionPhase` with `COMPLETED = "completed"` and `SessionStore.complete_documentary`, added `TelegramClient.send_voice` (`SEND_VOICE_TIMEOUT_SECONDS = 30`), implemented the deterministic `Narrator` TTS tool (`gemini-3.1-flash-tts-preview`, `DEFAULT_NARRATOR_VOICE = "Charon"`, Nikolai Drozdov *"In the World of Animals"* voice prompt prefix, `lameenc` raw PCM-to-MP3 encoding, `synthesize_to_temp_file` `try...finally` cleanup, and `event=narrator_audio_generated` logging), and wired voice delivery and stage-aware retry (`NARRATOR_ERROR_FALLBACK_MESSAGE`) into `poller.py` and `main.py`. 246 tests pass.
 - **Rubric Alignment:** End-to-end multimodal delivery (voice note narration).
 
 ---

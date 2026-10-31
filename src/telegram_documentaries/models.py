@@ -260,3 +260,58 @@ class DocumentaryScript(BaseModel):
         if not cleaned:
             raise ValueError("DocumentaryScript narration must not be empty.")
         return cleaned
+
+
+class GeneratedAudio(BaseModel):
+    """Validated audio bytes and MIME type returned by the Narrator TTS model."""
+
+    audio_bytes: bytes
+    mime_type: str = "audio/mpeg"
+
+    @field_validator("audio_bytes")
+    @classmethod
+    def validate_non_empty_bytes(cls, value: bytes) -> bytes:
+        if not value:
+            raise ValueError("GeneratedAudio audio_bytes must not be empty.")
+        return value
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_audio_mime_type(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        base_mime = cleaned.partition(";")[0].strip()
+        if not base_mime.startswith("audio/") or len(base_mime) <= len("audio/"):
+            raise ValueError("GeneratedAudio mime_type must be a non-empty 'audio/*' MIME type.")
+        return cleaned
+
+
+class SendVoicePayload(BaseModel):
+    """Validated outgoing payload for Telegram's sendVoice endpoint."""
+
+    chat_id: StrictInt
+    audio_bytes: bytes
+    caption: str | None = None
+
+    @field_validator("audio_bytes")
+    @classmethod
+    def validate_non_empty_audio_bytes(cls, value: bytes) -> bytes:
+        if not value:
+            raise ValueError("Voice audio_bytes must not be empty.")
+        return value
+
+    @field_validator("caption")
+    @classmethod
+    def validate_optional_caption(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Voice caption must not be empty or whitespace-only when provided.")
+        return cleaned
+
+
+class SendVoiceResponse(BaseModel):
+    """Envelope returned by Telegram's sendVoice endpoint."""
+
+    ok: StrictBool
+    result: TelegramMessage
