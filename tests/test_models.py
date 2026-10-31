@@ -6,8 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from telegram_documentaries.models import (
+    BehavioralDossier,
     BouncerVerdict,
     GetFileResponse,
+    InterviewerTurnResult,
+    InterviewTurn,
     TelegramFile,
     TelegramPhotoSize,
     TelegramUpdate,
@@ -190,5 +193,100 @@ def test_bouncer_verdict_rejects_empty_or_whitespace_subject(blank_subject: str)
                 "subject": blank_subject,
                 "is_human": False,
                 "rejection_message": "Nope.",
+            }
+        )
+
+
+def test_interview_turn_strips_and_accepts_valid_strings() -> None:
+    """InterviewTurn accepts valid strings and strips surrounding whitespace."""
+    turn = InterviewTurn(
+        question="  What time do you emerge from your burrow?  ",
+        answer="  Usually around 10am after coffee.  ",
+    )
+
+    assert turn.question == "What time do you emerge from your burrow?"
+    assert turn.answer == "Usually around 10am after coffee."
+
+
+@pytest.mark.parametrize("blank_value", ["", "   ", "\t\n"])
+def test_interview_turn_rejects_empty_or_whitespace_question_or_answer(
+    blank_value: str,
+) -> None:
+    """InterviewTurn rejects empty or whitespace-only question or answer."""
+    with pytest.raises(ValidationError):
+        InterviewTurn(question=blank_value, answer="Valid answer")
+
+    with pytest.raises(ValidationError):
+        InterviewTurn(question="Valid question?", answer=blank_value)
+
+
+def test_behavioral_dossier_validates_fields_and_has_descriptions() -> None:
+    """BehavioralDossier requires non-empty summary and suggested_animal with descriptions."""
+    dossier = BehavioralDossier(
+        summary="  Nocturnal couch-dweller who hoards snacks and avoids loud noises.  ",
+        suggested_animal="  Eurasian Badger  ",
+    )
+
+    assert dossier.summary == "Nocturnal couch-dweller who hoards snacks and avoids loud noises."
+    assert dossier.suggested_animal == "Eurasian Badger"
+
+    for field_name, field_info in BehavioralDossier.model_fields.items():
+        assert field_info.description is not None and field_info.description.strip(), (
+            f"Expected non-empty description on BehavioralDossier.{field_name}"
+        )
+
+
+@pytest.mark.parametrize("blank_value", ["", "   ", "\t\n"])
+def test_behavioral_dossier_rejects_empty_or_whitespace_fields(blank_value: str) -> None:
+    """BehavioralDossier rejects empty or whitespace-only summary or suggested_animal."""
+    with pytest.raises(ValidationError):
+        BehavioralDossier(summary=blank_value, suggested_animal="Eurasian Badger")
+
+    with pytest.raises(ValidationError):
+        BehavioralDossier(summary="Nocturnal forager.", suggested_animal=blank_value)
+
+
+def test_interviewer_turn_result_parses_in_progress_and_completed_turns() -> None:
+    """InterviewerTurnResult parses both in-progress turns and completed turns with dossier."""
+    in_progress = InterviewerTurnResult.model_validate(
+        {
+            "is_complete": False,
+            "next_question": "Where do you hoard your snacks?",
+        }
+    )
+    assert in_progress.is_complete is False
+    assert in_progress.next_question == "Where do you hoard your snacks?"
+    assert in_progress.dossier is None
+
+    completed = InterviewerTurnResult.model_validate(
+        {
+            "is_complete": True,
+            "next_question": "",
+            "dossier": {
+                "summary": "A solitary coffee-fueled creature of habit.",
+                "suggested_animal": "Red Panda",
+            },
+        }
+    )
+    assert completed.is_complete is True
+    assert completed.next_question == ""
+    assert completed.dossier is not None
+    assert completed.dossier.suggested_animal == "Red Panda"
+    assert completed.dossier.summary == "A solitary coffee-fueled creature of habit."
+
+    for field_name, field_info in InterviewerTurnResult.model_fields.items():
+        assert field_info.description is not None and field_info.description.strip(), (
+            f"Expected non-empty description on InterviewerTurnResult.{field_name}"
+        )
+
+
+@pytest.mark.parametrize("non_bool", ["false", "true", 1, 0, None])
+def test_interviewer_turn_result_rejects_non_bool_is_complete(non_bool: Any) -> None:
+    """InterviewerTurnResult enforces StrictBool on is_complete."""
+    with pytest.raises(ValidationError):
+        InterviewerTurnResult.model_validate(
+            {
+                "is_complete": non_bool,
+                "next_question": "Another question?",
             }
         )

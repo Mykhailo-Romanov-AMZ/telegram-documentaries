@@ -29,12 +29,13 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 ---
 
 ## Phase 3: The Interviewer & State Orchestrator
-- **Status:** Pending
+- **Status:** Completed
 - **Goal:** Implement the Interviewer agent (`gemini-3.1-flash-lite-preview`) doubling as the hub-and-spoke orchestrator that conducts a sequential 5–7 question behavioral interview per `chat_id` and compiles a structured behavioral dossier plus a suggested spirit animal.
 - **Acceptance Criteria:**
-  - Orchestrator tracks per-`chat_id` turn count and conversation history in memory.
-  - Asks one engaging question at a time for 5–7 turns following an accepted portrait.
-  - Produces a validated Pydantic `BehavioralDossier` (summary of habits, personality traits, habitat, and chosen spirit animal) upon completing the final question and transitions state to `GENERATING_MEDIA`.
+  - [x] Orchestrator tracks per-`chat_id` turn count and conversation history in memory.
+  - [x] Asks one engaging question at a time for 5–7 turns following an accepted portrait.
+  - [x] Produces a validated Pydantic `BehavioralDossier` (summary of habits, personality traits, habitat, and chosen spirit animal) upon completing the final question and transitions state to `GENERATING_MEDIA`.
+- **Delivery Summary:** Added strict Pydantic v2 interview boundary schemas (`InterviewTurn`, `BehavioralDossier`, `InterviewerTurnResult`), extended `SessionPhase` (`AWAITING_PHOTO` -> `INTERVIEWING` -> `GENERATING_MEDIA`) and `SessionStore` (`start_interview`, `record_answer`, `complete_interview`, `reset`), implemented the structured-output `Interviewer` agent (`gemini-3.1-flash-lite-preview`) with 5–7 turn bounds enforcement and `event=interviewer_question`/`event=interviewer_dossier` logging, and wired multi-turn interview orchestration and resilient error recovery into `poller.py` and `main.py`. 144 tests pass.
 - **Rubric Alignment:** Multi-turn stateful interview, per-`chat_id` session isolation, and structured dossier generation.
 
 ---
