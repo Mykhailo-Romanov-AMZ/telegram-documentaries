@@ -1,5 +1,8 @@
 """Tests for the in-memory per-chat session state store."""
 
+import logging
+from pathlib import Path
+
 import pytest
 
 from telegram_documentaries.models import BehavioralDossier, InterviewTurn
@@ -21,6 +24,7 @@ def test_get_creates_default_state_awaiting_photo_without_portrait() -> None:
     assert state.dossier is None
     assert state.hybrid_portrait is None
     assert state.script is None
+    assert state.ephemeral_files == []
 
 
 def test_get_is_stable_across_repeated_calls() -> None:
@@ -374,3 +378,98 @@ def test_start_interview_and_reset_transition_completed_session_and_clear_artifa
     assert after_reset.dossier is None
     assert after_reset.hybrid_portrait is None
     assert after_reset.script is None
+
+
+def test_register_and_cleanup_ephemeral_files_per_chat_id(tmp_path: Path) -> None:
+    """register_ephemeral_file tracks paths per chat_id and cleanup_ephemeral_files unlinks them."""
+    store = SessionStore()
+    file_a1 = tmp_path / "chat_a_1.mp3"
+    file_a2 = tmp_path / "chat_a_missing.mp3"
+    file_b1 = tmp_path / "chat_b_1.mp3"
+    file_a1.write_bytes(b"audio-a1")
+    file_b1.write_bytes(b"audio-b1")
+
+    state_a = store.register_ephemeral_file(chat_id=1001, path=file_a1)
+    store.register_ephemeral_file(chat_id=1001, path=file_a1)
+    store.register_ephemeral_file(chat_id=1001, path=file_a2)
+    store.register_ephemeral_file(chat_id=2002, path=file_b1)
+
+    assert state_a.ephemeral_files == [file_a1, file_a2]
+    assert store.get(chat_id=2002).ephemeral_files == [file_b1]
+
+    cleaned_a = store.cleanup_ephemeral_files(chat_id=1001)
+    assert cleaned_a.ephemeral_files == []
+    assert not file_a1.exists()
+    assert file_b1.exists()
+    assert store.get(chat_id=2002).ephemeral_files == [file_b1]
+
+
+def test_reset_executes_three_step_reset_routine_and_logs_session_reset(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """reset cancels active session, purges disk/memory assets, clears memory, and logs event."""
+    store = SessionStore()
+    dossier = BehavioralDossier(
+        summary="Nocturnal snacker.",
+        suggested_animal="Eurasian Badger",
+    )
+    temp_audio = tmp_path / "narration.mp3"
+    temp_audio.write_bytes(b"ID3-voice")
+    other_audio = tmp_path / "other_chat.mp3"
+    other_audio.write_bytes(b"ID3-other")
+
+    store.start_interview(chat_id=1001, portrait=b"portrait-a", first_question="Q1?")
+    store.record_answer(chat_id=1001, answer="A1", next_question="Q2?")
+    store.complete_interview(chat_id=1001, answer="A2", dossier=dossier)
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-hybrid")
+    store.set_script(chat_id=1001, script="Here in the midnight kitchen...")
+    store.register_ephemeral_file(chat_id=1001, path=temp_audio)
+    store.register_ephemeral_file(chat_id=2002, path=other_audio)
+
+    with caplog.at_level(logging.INFO, logger="telegram_documentaries"):
+        state = store.reset(chat_id=1001)
+
+    # 1. Cancel active session
+    assert state.phase == SessionPhase.AWAITING_PHOTO
+    assert state.current_question is None
+    # 2. Purge ephemeral assets on disk and in memory
+    assert not temp_audio.exists()
+    assert state.ephemeral_files == []
+    assert state.portrait is None
+    assert state.hybrid_portrait is None
+    # 3. Re-initialize agent memory and log event=session_reset
+    assert state.interview_history == []
+    assert state.dossier is None
+    assert state.script is None
+    assert "event=session_reset stage=session chat_id=1001" in caplog.text
+
+    # Other chat's ephemeral files are untouched
+    assert other_audio.exists()
+    assert store.get(chat_id=2002).ephemeral_files == [other_audio]
+
+
+def test_start_interview_and_complete_documentary_cleanup_ephemeral_files(
+    tmp_path: Path,
+) -> None:
+    """start_interview and complete_documentary unlink any tracked ephemeral_files for that chat."""
+    store = SessionStore()
+    lingering_1 = tmp_path / "lingering_1.mp3"
+    lingering_2 = tmp_path / "lingering_2.mp3"
+    lingering_1.write_bytes(b"audio-1")
+    lingering_2.write_bytes(b"audio-2")
+
+    store.register_ephemeral_file(chat_id=1001, path=lingering_1)
+    state_started = store.start_interview(
+        chat_id=1001,
+        portrait=b"portrait",
+        first_question="Q1?",
+    )
+    assert not lingering_1.exists()
+    assert state_started.ephemeral_files == []
+
+    store.register_ephemeral_file(chat_id=1001, path=lingering_2)
+    state_completed = store.complete_documentary(chat_id=1001)
+    assert not lingering_2.exists()
+    assert state_completed.ephemeral_files == []
+    assert state_completed.phase == SessionPhase.COMPLETED

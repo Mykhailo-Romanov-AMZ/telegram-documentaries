@@ -1,10 +1,11 @@
 """In-memory per-chat session state machine."""
 
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, Field, StrictInt
 
-from telegram_documentaries.logging_utils import log_stage
+from telegram_documentaries.logging_utils import log_stage, logger
 from telegram_documentaries.models import BehavioralDossier, InterviewTurn
 
 
@@ -28,6 +29,7 @@ class SessionState(BaseModel):
     dossier: BehavioralDossier | None = None
     hybrid_portrait: bytes | None = None
     script: str | None = None
+    ephemeral_files: list[Path] = Field(default_factory=list)
 
 
 class SessionStore:
@@ -42,6 +44,23 @@ class SessionStore:
         if state is None:
             state = SessionState(chat_id=chat_id)
             self._sessions[chat_id] = state
+        return state
+
+    @log_stage("session")
+    def register_ephemeral_file(self, chat_id: int, path: Path) -> SessionState:
+        """Track a temporary local media file path associated with a chat."""
+        state = self.get(chat_id)
+        if path not in state.ephemeral_files:
+            state.ephemeral_files.append(path)
+        return state
+
+    @log_stage("session")
+    def cleanup_ephemeral_files(self, chat_id: int) -> SessionState:
+        """Delete any tracked temporary media files on disk for a chat and clear the list."""
+        state = self.get(chat_id)
+        for path in list(state.ephemeral_files):
+            path.unlink(missing_ok=True)
+        state.ephemeral_files = []
         return state
 
     @log_stage("session")
@@ -63,6 +82,7 @@ class SessionStore:
         cleaned_question = first_question.strip()
         if not cleaned_question:
             raise ValueError("first_question must not be empty.")
+        self.cleanup_ephemeral_files(chat_id)
         state = self.get(chat_id)
         state.portrait = portrait
         state.phase = SessionPhase.INTERVIEWING
@@ -133,19 +153,25 @@ class SessionStore:
     @log_stage("session")
     def complete_documentary(self, chat_id: int) -> SessionState:
         """Transition a chat session to COMPLETED after voice narration delivery."""
+        self.cleanup_ephemeral_files(chat_id)
         state = self.get(chat_id)
         state.phase = SessionPhase.COMPLETED
         return state
 
     @log_stage("session")
     def reset(self, chat_id: int) -> SessionState:
-        """Clear portrait and interview artifacts and return the chat to AWAITING_PHOTO."""
+        """Execute the 3-step session reset routine for a chat without restarting the process."""
         state = self.get(chat_id)
+        # 1. Cancel active session
         state.phase = SessionPhase.AWAITING_PHOTO
-        state.portrait = None
         state.current_question = None
+        # 2. Purge ephemeral assets on disk and in memory
+        self.cleanup_ephemeral_files(chat_id)
+        state.portrait = None
+        state.hybrid_portrait = None
+        # 3. Re-initialize agent memory
         state.interview_history = []
         state.dossier = None
-        state.hybrid_portrait = None
         state.script = None
+        logger.info("event=session_reset stage=session chat_id=%s", chat_id)
         return state

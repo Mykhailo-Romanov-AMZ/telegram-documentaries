@@ -27,6 +27,7 @@ class TelegramMessage(BaseModel):
     message_id: StrictInt
     chat: TelegramChat
     text: str | None = None
+    caption: str | None = None
     photo: list[TelegramPhotoSize] | None = None
 
 
