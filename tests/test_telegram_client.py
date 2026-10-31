@@ -16,7 +16,11 @@ from telegram_documentaries.models import (
     TelegramMessage,
     TelegramUpdate,
 )
-from telegram_documentaries.telegram_client import TelegramClient, TelegramClientError
+from telegram_documentaries.telegram_client import (
+    SEND_PHOTO_TIMEOUT_SECONDS,
+    TelegramClient,
+    TelegramClientError,
+)
 
 
 def test_parse_valid_get_updates_response_with_text_and_non_text_messages() -> None:
@@ -322,6 +326,7 @@ def test_telegram_client_reports_json_decode_error_as_invalid_response() -> None
     [
         ("get_updates", "get", "getUpdates"),
         ("send_message", "post", "sendMessage"),
+        ("send_photo", "post", "sendPhoto"),
         ("get_file", "get", "getFile"),
         ("download_file", "get", "download_file"),
     ],
@@ -350,6 +355,8 @@ def test_telegram_client_errors_never_leak_bot_token(
             client.get_updates()
         elif method_name == "send_message":
             client.send_message(chat_id=123, text="hey mate!")
+        elif method_name == "send_photo":
+            client.send_photo(chat_id=123, photo_bytes=b"\x89PNG-bytes")
         elif method_name == "get_file":
             client.get_file(file_id="photo-file-id")
         else:
@@ -361,3 +368,99 @@ def test_telegram_client_errors_never_leak_bot_token(
     assert endpoint in message
     assert "401" in message
     assert exc_info.value.__cause__ is None
+
+
+def test_telegram_client_send_photo_posts_multipart_and_returns_validated_message() -> None:
+    """send_photo uploads multipart photo bytes to sendPhoto and returns a TelegramMessage."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {
+        "ok": True,
+        "result": {
+            "message_id": 88,
+            "chat": {"id": 12345},
+            "photo": [
+                {
+                    "file_id": "hybrid-photo-id",
+                    "file_unique_id": "u-hybrid-photo-id",
+                    "width": 1024,
+                    "height": 1024,
+                }
+            ],
+        },
+    }
+    mock_session.post.return_value = mock_response
+    photo_bytes = b"\x89PNG\r\n\x1a\nhybrid-bytes"
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    sent = client.send_photo(chat_id=12345, photo_bytes=photo_bytes)
+
+    assert isinstance(sent, TelegramMessage)
+    assert sent.message_id == 88
+    assert sent.chat.id == 12345
+    assert sent.photo is not None
+    assert sent.photo[0].file_id == "hybrid-photo-id"
+
+    mock_session.post.assert_called_once_with(
+        "https://api.telegram.org/bottest-token-123/sendPhoto",
+        data={"chat_id": 12345},
+        files={"photo": ("hybrid_portrait.png", photo_bytes, "image/png")},
+        timeout=SEND_PHOTO_TIMEOUT_SECONDS,
+    )
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_telegram_client_send_photo_includes_optional_caption_when_provided() -> None:
+    """send_photo includes stripped caption in form data when a caption is provided."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {
+        "ok": True,
+        "result": {
+            "message_id": 89,
+            "chat": {"id": 12345},
+        },
+    }
+    mock_session.post.return_value = mock_response
+    photo_bytes = b"\x89PNG-bytes"
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+    client.send_photo(chat_id=12345, photo_bytes=photo_bytes, caption="  Spirit Animal!  ")
+
+    mock_session.post.assert_called_once_with(
+        "https://api.telegram.org/bottest-token-123/sendPhoto",
+        data={"chat_id": 12345, "caption": "Spirit Animal!"},
+        files={"photo": ("hybrid_portrait.png", photo_bytes, "image/png")},
+        timeout=SEND_PHOTO_TIMEOUT_SECONDS,
+    )
+
+
+def test_telegram_client_send_photo_validates_inputs_before_request() -> None:
+    """send_photo raises ValidationError on empty photo_bytes or non-StrictInt chat_id."""
+    mock_session = MagicMock(spec=requests.Session)
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(ValidationError):
+        client.send_photo(chat_id=12345, photo_bytes=b"")
+
+    with pytest.raises(ValidationError):
+        client.send_photo(chat_id=True, photo_bytes=b"\x89PNG")
+
+    mock_session.post.assert_not_called()
+
+
+def test_telegram_client_send_photo_wraps_invalid_response_envelope() -> None:
+    """send_photo raises TelegramClientError when Telegram returns malformed JSON or schema."""
+    mock_session = MagicMock(spec=requests.Session)
+    mock_response = MagicMock(spec=requests.Response)
+    mock_response.json.return_value = {"ok": True, "result": {"bad": "shape"}}
+    mock_session.post.return_value = mock_response
+
+    client = TelegramClient(bot_token="test-token-123", session=mock_session)
+
+    with pytest.raises(TelegramClientError) as exc_info:
+        client.send_photo(chat_id=12345, photo_bytes=b"\x89PNG-bytes")
+
+    assert exc_info.value.__cause__ is None
+    assert "sendPhoto" in str(exc_info.value)
+    assert "invalid response" in str(exc_info.value)

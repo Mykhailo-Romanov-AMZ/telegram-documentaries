@@ -19,6 +19,7 @@ def test_get_creates_default_state_awaiting_photo_without_portrait() -> None:
     assert state.current_question is None
     assert state.interview_history == []
     assert state.dossier is None
+    assert state.hybrid_portrait is None
 
 
 def test_get_is_stable_across_repeated_calls() -> None:
@@ -221,3 +222,44 @@ def test_two_chat_ids_never_share_interview_history_current_question_or_dossier(
     assert state_b.phase == SessionPhase.INTERVIEWING
     assert state_b.dossier is None
     assert state_b.current_question == "Chat B Q1?"
+
+
+def test_set_hybrid_portrait_stores_bytes_and_rejects_empty_bytes() -> None:
+    """set_hybrid_portrait stores non-empty hybrid_portrait bytes and rejects empty bytes."""
+    store = SessionStore()
+    hybrid_bytes = b"\x89PNG-hybrid-portrait"
+
+    state = store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=hybrid_bytes)
+
+    assert state.hybrid_portrait == hybrid_bytes
+    assert store.get(chat_id=1001).hybrid_portrait == hybrid_bytes
+
+    with pytest.raises(ValueError, match="hybrid_portrait"):
+        store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"")
+
+
+def test_start_interview_and_reset_clear_hybrid_portrait() -> None:
+    """Both start_interview and reset clear any previously stored hybrid_portrait."""
+    store = SessionStore()
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-hybrid")
+    assert store.get(chat_id=1001).hybrid_portrait == b"\x89PNG-hybrid"
+
+    state_after_start = store.start_interview(
+        chat_id=1001,
+        portrait=b"new-portrait",
+        first_question="Q1?",
+    )
+    assert state_after_start.hybrid_portrait is None
+
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-hybrid-2")
+    state_after_reset = store.reset(chat_id=1001)
+    assert state_after_reset.hybrid_portrait is None
+
+
+def test_two_chat_ids_never_share_hybrid_portrait() -> None:
+    """hybrid_portrait is strictly isolated per chat_id."""
+    store = SessionStore()
+    store.set_hybrid_portrait(chat_id=1001, hybrid_portrait=b"\x89PNG-chat-a")
+
+    assert store.get(chat_id=1001).hybrid_portrait == b"\x89PNG-chat-a"
+    assert store.get(chat_id=2002).hybrid_portrait is None
