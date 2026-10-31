@@ -76,10 +76,14 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 ---
 
 ## Phase 7: Resilience, Reset Commands & Edge Guards
-- **Status:** Pending
-- **Goal:** Harden the pipeline with `/start` and `/restart` reset handlers, out-of-order payload guards at every state-machine phase, temporary file cleanup, and graceful error recovery for upstream API failures.
+- **Status:** Completed
+- **Goal:** Harden the pipeline with an explicit three-step `/start` and `/restart` reset routine (1. Cancel Active Sessions, 2. Purge Ephemeral Assets on disk and in memory, 3. Re-initialize Agent Memory), out-of-order payload guards at every state-machine phase, temporary file cleanup, and graceful error recovery for upstream API failures.
 - **Acceptance Criteria:**
-  - `/start` and `/restart` immediately wipe the user's in-memory session state and temporary files at any point without restarting the process.
-  - Sending text in `AWAITING_PHOTO` or sending a photo during `INTERVIEWING` returns a helpful prompt without corrupting state.
-  - Gemini or Telegram API timeouts/errors are logged loudly via structured logging decorators and surface a friendly retry message to the user.
+  - [x] `/start` and `/restart` immediately perform three actions for the requesting `chat_id` without restarting the process:
+    1. **Cancel Active Sessions:** Terminate any running interview loops or waiting states (`INTERVIEWING`, `GENERATING_MEDIA`, `COMPLETED`).
+    2. **Purge Ephemeral Assets:** Delete temporary media on disk (original photo, converted PNG, generated OGG/MP3 voice files) and clear in-memory binary payloads.
+    3. **Re-initialize Agent Memory:** Clear conversation history buffers (`interview_history`), `current_question`, `dossier`, `hybrid_portrait`, and `script`, and reset state trackers back to the greeting stage (`AWAITING_PHOTO`).
+  - [x] Sending text in `AWAITING_PHOTO`, sending a photo during `INTERVIEWING` / `GENERATING_MEDIA` / `COMPLETED`, or sending unsupported media payloads returns a helpful guidance prompt without corrupting state.
+  - [x] Gemini or Telegram API timeouts/errors are logged loudly via structured logging decorators and surface a friendly retry message to the user.
+- **Delivery Summary:** Extended `TelegramMessage` with `caption: str | None = None` so `/start` and `/restart` work in both text messages and photo captions; added per-`chat_id` `ephemeral_files: list[Path]` tracking (`register_ephemeral_file`, `cleanup_ephemeral_files`) and an explicit 3-step `SessionStore.reset` routine (canceling active sessions, unlinking tracked temporary files on disk and clearing in-memory binary payloads, re-initializing agent memory, and emitting `event=session_reset stage=session`); registered temporary voice narration files with `SessionStore` during `_synthesize_and_send_voice`; added `INTERVIEW_PHOTO_GUARD_MESSAGE` and phase guards for out-of-order photos (`INTERVIEWING`, `GENERATING_MEDIA`, `COMPLETED`) and unsupported media payloads (`event=unsupported_payload`); wrapped fallback `send_message` calls in `try/except TelegramClientError` (`event=*_fallback_failed`); and verified back-to-back full documentary runs in a single process. 256 tests pass.
 - **Rubric Alignment:** `/restart` state hygiene, wrong-payload guards, and production-grade error resilience.

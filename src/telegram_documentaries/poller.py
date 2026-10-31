@@ -44,6 +44,10 @@ NARRATOR_ERROR_FALLBACK_MESSAGE = (
     "My field microphone crackled out — send any message to retry recording your voiceover, "
     "or /restart to begin anew!"
 )
+INTERVIEW_PHOTO_GUARD_MESSAGE = (
+    "Hold your horses, mate — we're right in the middle of our field interview! "
+    "Reply with a text answer to the current question, or type /restart to start fresh."
+)
 INTERVIEW_COMPLETE_NUDGE = (
     "Field research is already wrapped up, mate! Send /restart if you'd like to begin a "
     "fresh documentary."
@@ -110,21 +114,26 @@ def _generate_script(
 def _synthesize_and_send_voice(
     narrator: Narrator,
     client: TelegramClient,
+    sessions: SessionStore,
     script: str,
     chat_id: int,
 ) -> None:
     """Synthesize speech to a temporary audio file and upload it via sendVoice with chat_id."""
     with narrator.synthesize_to_temp_file(script) as audio_path:
-        audio_bytes = audio_path.read_bytes()
-        if audio_path.suffix == ".ogg":
-            client.send_voice(
-                chat_id=chat_id,
-                audio_bytes=audio_bytes,
-                filename="narration.ogg",
-                mime_type="audio/ogg",
-            )
-        else:
-            client.send_voice(chat_id=chat_id, audio_bytes=audio_bytes)
+        sessions.register_ephemeral_file(chat_id, audio_path)
+        try:
+            audio_bytes = audio_path.read_bytes()
+            if audio_path.suffix == ".ogg":
+                client.send_voice(
+                    chat_id=chat_id,
+                    audio_bytes=audio_bytes,
+                    filename="narration.ogg",
+                    mime_type="audio/ogg",
+                )
+            else:
+                client.send_voice(chat_id=chat_id, audio_bytes=audio_bytes)
+        finally:
+            sessions.cleanup_ephemeral_files(chat_id)
 
 
 def _deliver_voice_narration(
@@ -139,6 +148,7 @@ def _deliver_voice_narration(
         _synthesize_and_send_voice(
             narrator=narrator,
             client=client,
+            sessions=sessions,
             script=script,
             chat_id=chat_id,
         )
@@ -224,7 +234,14 @@ def _deliver_hybrid_portrait(
             chat_id,
             exc,
         )
-        client.send_message(chat_id=chat_id, text=CONVERTER_ERROR_FALLBACK_MESSAGE)
+        try:
+            client.send_message(chat_id=chat_id, text=CONVERTER_ERROR_FALLBACK_MESSAGE)
+        except TelegramClientError as fallback_exc:
+            logger.exception(
+                "event=converter_fallback_failed stage=gateway chat_id=%s error=%s",
+                chat_id,
+                fallback_exc,
+            )
         return
 
     sessions.set_hybrid_portrait(chat_id=chat_id, hybrid_portrait=hybrid_bytes)
@@ -244,9 +261,30 @@ def _handle_photo(
     sessions: SessionStore,
     bouncer: Bouncer,
     interviewer: Interviewer,
+    converter: Converter,
+    scripter: Scripter,
+    narrator: Narrator,
 ) -> None:
-    """Download the largest photo, run the Bouncer, and start the interview when human."""
+    """Guard non-initial phases or download the largest photo, run Bouncer, and start Q1."""
     chat_id = message.chat.id
+    phase = sessions.get(chat_id).phase
+    if phase == SessionPhase.INTERVIEWING:
+        client.send_message(chat_id=chat_id, text=INTERVIEW_PHOTO_GUARD_MESSAGE)
+        return
+    if phase == SessionPhase.GENERATING_MEDIA:
+        _handle_generating_media_text(
+            chat_id=chat_id,
+            client=client,
+            sessions=sessions,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+        return
+    if phase == SessionPhase.COMPLETED:
+        client.send_message(chat_id=chat_id, text=INTERVIEW_COMPLETE_NUDGE)
+        return
+
     photo = _largest_photo(message.photo or [])
 
     try:
@@ -263,7 +301,14 @@ def _handle_photo(
             chat_id,
             exc,
         )
-        client.send_message(chat_id=chat_id, text=ERROR_FALLBACK_MESSAGE)
+        try:
+            client.send_message(chat_id=chat_id, text=ERROR_FALLBACK_MESSAGE)
+        except TelegramClientError as fallback_exc:
+            logger.exception(
+                "event=photo_gate_fallback_failed stage=gateway chat_id=%s error=%s",
+                chat_id,
+                fallback_exc,
+            )
         return
 
     if verdict.is_human:
@@ -280,7 +325,14 @@ def _handle_photo(
                 exc,
             )
             sessions.reset(chat_id=chat_id)
-            client.send_message(chat_id=chat_id, text=ERROR_FALLBACK_MESSAGE)
+            try:
+                client.send_message(chat_id=chat_id, text=ERROR_FALLBACK_MESSAGE)
+            except TelegramClientError as fallback_exc:
+                logger.exception(
+                    "event=interview_start_fallback_failed stage=gateway chat_id=%s error=%s",
+                    chat_id,
+                    fallback_exc,
+                )
             return
 
         sessions.start_interview(
@@ -343,7 +395,14 @@ def _handle_interview_text(
             chat_id,
             exc,
         )
-        client.send_message(chat_id=chat_id, text=INTERVIEW_ERROR_FALLBACK_MESSAGE)
+        try:
+            client.send_message(chat_id=chat_id, text=INTERVIEW_ERROR_FALLBACK_MESSAGE)
+        except TelegramClientError as fallback_exc:
+            logger.exception(
+                "event=interview_turn_fallback_failed stage=gateway chat_id=%s error=%s",
+                chat_id,
+                fallback_exc,
+            )
         return
 
     if turn_result.is_complete and turn_result.dossier is not None:
@@ -440,6 +499,11 @@ def process_update(
         return
 
     chat_id = message.chat.id
+    command_candidate = message.text if message.text is not None else message.caption
+    if command_candidate is not None and _is_reset_command(command_candidate):
+        sessions.reset(chat_id=chat_id)
+        client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
+        return
 
     if message.photo:
         _handle_photo(
@@ -448,15 +512,13 @@ def process_update(
             sessions=sessions,
             bouncer=bouncer,
             interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
         )
         return
 
     if message.text is not None:
-        if _is_reset_command(message.text):
-            sessions.reset(chat_id=chat_id)
-            client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
-            return
-
         phase = sessions.get(chat_id).phase
         if phase == SessionPhase.AWAITING_PHOTO:
             client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
@@ -484,10 +546,27 @@ def process_update(
             client.send_message(chat_id=chat_id, text=INTERVIEW_COMPLETE_NUDGE)
         return
 
-    logger.debug(
-        "event=update_ignored stage=gateway chat_id=%s reason=no_photo_or_text",
+    phase = sessions.get(chat_id).phase
+    logger.info(
+        "event=unsupported_payload stage=gateway chat_id=%s phase=%s",
         chat_id,
+        phase,
     )
+    if phase == SessionPhase.AWAITING_PHOTO:
+        client.send_message(chat_id=chat_id, text=AWAITING_PHOTO_NUDGE)
+    elif phase == SessionPhase.INTERVIEWING:
+        client.send_message(chat_id=chat_id, text=INTERVIEW_PHOTO_GUARD_MESSAGE)
+    elif phase == SessionPhase.GENERATING_MEDIA:
+        _handle_generating_media_text(
+            chat_id=chat_id,
+            client=client,
+            sessions=sessions,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+    else:
+        client.send_message(chat_id=chat_id, text=INTERVIEW_COMPLETE_NUDGE)
 
 
 @log_stage("polling")

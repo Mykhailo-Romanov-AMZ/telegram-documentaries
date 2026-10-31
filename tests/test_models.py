@@ -39,7 +39,32 @@ def test_text_only_update_still_parses_with_photo_defaulting_to_none() -> None:
 
     assert update.message is not None
     assert update.message.text == "hello"
+    assert update.message.caption is None
     assert update.message.photo is None
+
+
+def test_photo_update_accepts_optional_caption() -> None:
+    """A photo update parses an optional caption string and defaults caption to None."""
+    with_caption = TelegramUpdate.model_validate(
+        {
+            "update_id": 10,
+            "message": {
+                "message_id": 19,
+                "chat": {"id": 555},
+                "caption": "/restart",
+                "photo": [
+                    {
+                        "file_id": "small",
+                        "file_unique_id": "u-small",
+                        "width": 90,
+                        "height": 90,
+                    }
+                ],
+            },
+        }
+    )
+    assert with_caption.message is not None
+    assert with_caption.message.caption == "/restart"
 
 
 def test_update_with_photo_sizes_parses_typed_photo_models() -> None:

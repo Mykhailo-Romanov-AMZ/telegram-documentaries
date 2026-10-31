@@ -34,6 +34,7 @@ from telegram_documentaries.poller import (
     ERROR_FALLBACK_MESSAGE,
     INTERVIEW_COMPLETE_NUDGE,
     INTERVIEW_ERROR_FALLBACK_MESSAGE,
+    INTERVIEW_PHOTO_GUARD_MESSAGE,
     NARRATOR_ERROR_FALLBACK_MESSAGE,
     SCRIPTER_ERROR_FALLBACK_MESSAGE,
     poll_once,
@@ -54,13 +55,18 @@ SAMPLE_SCRIPT = (
 )
 
 
-def _photo_update(chat_id: int, update_id: int = 100) -> TelegramUpdate:
+def _photo_update(
+    chat_id: int,
+    update_id: int = 100,
+    caption: str | None = None,
+) -> TelegramUpdate:
     """Build a photo update with three sizes so 'largest wins' can be asserted."""
     return TelegramUpdate(
         update_id=update_id,
         message=TelegramMessage(
             message_id=1,
             chat=TelegramChat(id=chat_id),
+            caption=caption,
             photo=[
                 TelegramPhotoSize(
                     file_id="small",
@@ -1356,16 +1362,20 @@ def test_update_without_message_is_ignored(caplog: pytest.LogCaptureFixture) -> 
     assert "reason=no_message" in messages
 
 
-def test_message_without_photo_or_text_is_ignored(
+def test_message_without_photo_or_text_sends_phase_guidance(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A non-photo, non-text message is silently ignored apart from debug logging."""
+    """An unsupported message (sticker/voice/document) sends phase-appropriate guidance."""
     client = MagicMock(spec=TelegramClient)
     bouncer = MagicMock(spec=Bouncer)
     interviewer = _ready_interviewer()
+    converter = _ready_converter()
+    scripter = _ready_scripter()
+    narrator = _ready_narrator()
     sessions = SessionStore()
 
-    with caplog.at_level(logging.DEBUG, logger="telegram_documentaries"):
+    # 1. AWAITING_PHOTO -> AWAITING_PHOTO_NUDGE
+    with caplog.at_level(logging.INFO, logger="telegram_documentaries"):
         process_update(
             update=TelegramUpdate(
                 update_id=103,
@@ -1375,15 +1385,68 @@ def test_message_without_photo_or_text_is_ignored(
             sessions=sessions,
             bouncer=bouncer,
             interviewer=interviewer,
-            converter=_ready_converter(),
-            scripter=_ready_scripter(),
-            narrator=_ready_narrator(),
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
         )
 
-    client.send_message.assert_not_called()
-    bouncer.evaluate.assert_not_called()
-    assert "chat_id=222" in caplog.text
-    assert "reason=no_photo_or_text" in caplog.text
+    client.send_message.assert_called_once_with(chat_id=222, text=AWAITING_PHOTO_NUDGE)
+    assert "event=unsupported_payload stage=gateway chat_id=222" in caplog.text
+
+    # 2. INTERVIEWING -> INTERVIEW_PHOTO_GUARD_MESSAGE
+    client.reset_mock()
+    sessions.start_interview(chat_id=222, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    process_update(
+        update=TelegramUpdate(
+            update_id=104,
+            message=TelegramMessage(message_id=4, chat=TelegramChat(id=222)),
+        ),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    client.send_message.assert_called_once_with(chat_id=222, text=INTERVIEW_PHOTO_GUARD_MESSAGE)
+    assert sessions.get(chat_id=222).phase == SessionPhase.INTERVIEWING
+
+    # 3. GENERATING_MEDIA -> retries pending stage
+    client.reset_mock()
+    dossier = BehavioralDossier(summary="Dossier.", suggested_animal="Red Panda")
+    sessions.complete_interview(chat_id=222, answer="A1", dossier=dossier)
+    process_update(
+        update=TelegramUpdate(
+            update_id=105,
+            message=TelegramMessage(message_id=5, chat=TelegramChat(id=222)),
+        ),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    assert sessions.get(chat_id=222).phase == SessionPhase.COMPLETED
+
+    # 4. COMPLETED -> INTERVIEW_COMPLETE_NUDGE
+    client.reset_mock()
+    process_update(
+        update=TelegramUpdate(
+            update_id=106,
+            message=TelegramMessage(message_id=6, chat=TelegramChat(id=222)),
+        ),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    client.send_message.assert_called_once_with(chat_id=222, text=INTERVIEW_COMPLETE_NUDGE)
 
 
 def test_download_error_sends_fallback_logs_traceback_and_preserves_state(
@@ -1400,11 +1463,6 @@ def test_download_error_sends_fallback_logs_traceback_and_preserves_state(
     bouncer = _human_bouncer()
     interviewer = _ready_interviewer()
     sessions = SessionStore()
-    sessions.start_interview(
-        chat_id=98765,
-        portrait=b"existing-portrait",
-        first_question="Existing Q1?",
-    )
 
     with caplog.at_level(logging.ERROR):
         process_update(
@@ -1423,9 +1481,8 @@ def test_download_error_sends_fallback_logs_traceback_and_preserves_state(
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert any(record.exc_info is not None for record in error_records)
     state = sessions.get(chat_id=98765)
-    assert state.phase == SessionPhase.INTERVIEWING
-    assert state.portrait == b"existing-portrait"
-    assert state.current_question == "Existing Q1?"
+    assert state.phase == SessionPhase.AWAITING_PHOTO
+    assert state.portrait is None
 
 
 def test_bouncer_error_sends_fallback_logs_traceback_and_preserves_state(
@@ -1458,8 +1515,8 @@ def test_bouncer_error_sends_fallback_logs_traceback_and_preserves_state(
     assert state.portrait is None
 
 
-def test_human_photo_during_interviewing_replaces_portrait_and_restarts_interview() -> None:
-    """A new human photo mid-interview replaces the portrait, clears history, and asks Q1."""
+def test_photo_during_interviewing_sends_guard_message_and_preserves_interview_state() -> None:
+    """Photo sent during INTERVIEWING replies with INTERVIEW_PHOTO_GUARD_MESSAGE without Bouncer."""
     client = _client_with_portrait()
     bouncer = _human_bouncer()
     interviewer = _ready_interviewer(first_question="Fresh Question 1?")
@@ -1478,12 +1535,19 @@ def test_human_photo_during_interviewing_replaces_portrait_and_restarts_intervie
         narrator=_ready_narrator(),
     )
 
-    client.send_message.assert_called_once_with(chat_id=98765, text="Fresh Question 1?")
+    client.get_file.assert_not_called()
+    client.download_file.assert_not_called()
+    bouncer.evaluate.assert_not_called()
+    interviewer.start_interview.assert_not_called()
+    client.send_message.assert_called_once_with(
+        chat_id=98765,
+        text=INTERVIEW_PHOTO_GUARD_MESSAGE,
+    )
     state = sessions.get(chat_id=98765)
     assert state.phase == SessionPhase.INTERVIEWING
-    assert state.portrait == PORTRAIT_BYTES
-    assert state.current_question == "Fresh Question 1?"
-    assert state.interview_history == []
+    assert state.portrait == b"old-portrait"
+    assert state.current_question == "Old Q2?"
+    assert state.interview_history == [InterviewTurn(question="Old Q1?", answer="Old A1")]
 
 
 def test_human_photo_logs_bouncer_and_interviewer_stages_with_chat_id(
@@ -1513,37 +1577,54 @@ def test_human_photo_logs_bouncer_and_interviewer_stages_with_chat_id(
     assert any("chat_id=98765" in record.getMessage() for record in interviewer_records)
 
 
-def test_non_human_photo_during_interviewing_resets_session() -> None:
-    """A rejected replacement photo mid-interview clears the stored portrait and history."""
+def test_photo_during_completed_or_generating_media_guards_state_without_calling_bouncer() -> None:
+    """Photos in COMPLETED send complete nudge; photos in GENERATING_MEDIA retry pending stage."""
     client = _client_with_portrait()
-    bouncer = MagicMock(spec=Bouncer)
-    cheeky = "That's a cat, mate. Impressive whiskers — but I need a human."
-    bouncer.evaluate.return_value = BouncerVerdict(
-        is_human=False,
-        subject="a cat",
-        rejection_message=cheeky,
-    )
+    bouncer = _human_bouncer()
     interviewer = _ready_interviewer()
+    converter = _ready_converter()
+    scripter = _ready_scripter()
+    narrator = _ready_narrator()
+    dossier = BehavioralDossier(summary="Summary.", suggested_animal="Red Panda")
     sessions = SessionStore()
-    sessions.start_interview(chat_id=98765, portrait=b"old-portrait", first_question="Q1?")
+    sessions.start_interview(chat_id=98765, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    sessions.complete_interview(chat_id=98765, answer="A1", dossier=dossier)
 
+    # Photo during GENERATING_MEDIA retries pending media stage without calling Bouncer
     process_update(
         update=_photo_update(chat_id=98765, update_id=107),
         client=client,
         sessions=sessions,
         bouncer=bouncer,
         interviewer=interviewer,
-        converter=_ready_converter(),
-        scripter=_ready_scripter(),
-        narrator=_ready_narrator(),
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
     )
+    client.get_file.assert_not_called()
+    bouncer.evaluate.assert_not_called()
+    assert sessions.get(chat_id=98765).phase == SessionPhase.COMPLETED
+    assert sessions.get(chat_id=98765).portrait == PORTRAIT_BYTES
 
-    client.send_message.assert_called_once_with(chat_id=98765, text=cheeky)
-    state = sessions.get(chat_id=98765)
-    assert state.phase == SessionPhase.AWAITING_PHOTO
-    assert state.portrait is None
-    assert state.current_question is None
-    assert state.interview_history == []
+    # Photo during COMPLETED replies with INTERVIEW_COMPLETE_NUDGE
+    client.reset_mock()
+    process_update(
+        update=_photo_update(chat_id=98765, update_id=108),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    client.get_file.assert_not_called()
+    bouncer.evaluate.assert_not_called()
+    client.send_message.assert_called_once_with(
+        chat_id=98765,
+        text=INTERVIEW_COMPLETE_NUDGE,
+    )
+    assert sessions.get(chat_id=98765).phase == SessionPhase.COMPLETED
 
 
 @pytest.mark.parametrize("file_path", [None, ""])
@@ -1561,7 +1642,6 @@ def test_missing_or_empty_file_path_sends_fallback_without_downloading_or_evalua
     bouncer = _human_bouncer()
     interviewer = _ready_interviewer()
     sessions = SessionStore()
-    sessions.start_interview(chat_id=98765, portrait=b"existing-portrait", first_question="Q1?")
 
     with caplog.at_level(logging.ERROR):
         process_update(
@@ -1581,8 +1661,8 @@ def test_missing_or_empty_file_path_sends_fallback_without_downloading_or_evalua
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert any(record.exc_info is not None for record in error_records)
     state = sessions.get(chat_id=98765)
-    assert state.phase == SessionPhase.INTERVIEWING
-    assert state.portrait == b"existing-portrait"
+    assert state.phase == SessionPhase.AWAITING_PHOTO
+    assert state.portrait is None
 
 
 def test_two_chat_ids_do_not_leak_phase_or_portrait() -> None:
@@ -1842,3 +1922,314 @@ def test_run_polling_loop_logs_startup_and_advances_offsets(
     assert "Telegram polling loop started" in info_messages
     assert client.get_updates.call_args_list[0].kwargs == {"offset": None, "timeout": 5}
     assert client.get_updates.call_args_list[1].kwargs == {"offset": 11, "timeout": 5}
+
+
+@pytest.mark.parametrize("caption_cmd", ["/start", "/restart", "  /restart@NatureDocBot  "])
+def test_photo_with_reset_caption_purges_ephemeral_files_and_resets_session(
+    tmp_path: Path,
+    caption_cmd: str,
+) -> None:
+    """A photo carrying /start or /restart in caption purges disk files and resets state."""
+    client = _client_with_portrait()
+    bouncer = _human_bouncer()
+    interviewer = _ready_interviewer()
+    sessions = SessionStore()
+    ephemeral_file = tmp_path / "temp_voice.mp3"
+    ephemeral_file.write_bytes(b"ID3-voice")
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    sessions.register_ephemeral_file(chat_id=111, path=ephemeral_file)
+
+    process_update(
+        update=_photo_update(chat_id=111, caption=caption_cmd),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=_ready_converter(),
+        scripter=_ready_scripter(),
+        narrator=_ready_narrator(),
+    )
+
+    client.get_file.assert_not_called()
+    bouncer.evaluate.assert_not_called()
+    client.send_message.assert_called_once_with(chat_id=111, text=AWAITING_PHOTO_NUDGE)
+    assert not ephemeral_file.exists()
+    state = sessions.get(chat_id=111)
+    assert state.phase == SessionPhase.AWAITING_PHOTO
+    assert state.portrait is None
+    assert state.ephemeral_files == []
+
+
+def test_narrator_voice_synthesis_registers_and_cleans_up_ephemeral_file_in_session_store() -> None:
+    """_synthesize_and_send_voice registers the temp audio path with SessionStore and cleans up."""
+    client = MagicMock(spec=TelegramClient)
+    bouncer = MagicMock(spec=Bouncer)
+    interviewer = MagicMock(spec=Interviewer)
+    converter = _ready_converter()
+    scripter = _ready_scripter()
+    narrator = _ready_narrator()
+    dossier = BehavioralDossier(summary="Dossier.", suggested_animal="Red Panda")
+    sessions = SessionStore()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
+    sessions.set_hybrid_portrait(chat_id=111, hybrid_portrait=HYBRID_PORTRAIT_BYTES)
+    sessions.set_script(chat_id=111, script=SAMPLE_SCRIPT)
+
+    with (
+        patch.object(
+            sessions,
+            "register_ephemeral_file",
+            wraps=sessions.register_ephemeral_file,
+        ) as register_spy,
+        patch.object(
+            sessions,
+            "cleanup_ephemeral_files",
+            wraps=sessions.cleanup_ephemeral_files,
+        ) as cleanup_spy,
+    ):
+        process_update(
+            update=_text_update(chat_id=111, text="Retry my voiceover!"),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+
+    assert register_spy.call_count == 1
+    assert register_spy.call_args.args[0] == 111
+    assert isinstance(register_spy.call_args.args[1], Path)
+    assert cleanup_spy.call_count >= 1
+    assert sessions.get(chat_id=111).ephemeral_files == []
+    assert sessions.get(chat_id=111).phase == SessionPhase.COMPLETED
+
+
+def test_fallback_send_message_failures_are_caught_and_logged_across_photo_interview_and_converter(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fallback send_message errors in photo, interview, and converter paths log without raising."""
+    # 1. Photo gate failure + fallback send failure
+    client = MagicMock(spec=TelegramClient)
+    client.get_file.side_effect = TelegramClientError("getFile boom")
+    client.send_message.side_effect = TelegramClientError("fallback send boom")
+    bouncer = _human_bouncer()
+    interviewer = _ready_interviewer()
+    converter = MagicMock(spec=Converter)
+    converter.generate_hybrid_portrait.side_effect = ConverterError("converter boom")
+    scripter = _ready_scripter()
+    narrator = _ready_narrator()
+    sessions = SessionStore()
+
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_photo_update(chat_id=111, update_id=201),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+    assert "event=photo_gate_fallback_failed stage=gateway chat_id=111" in caplog.text
+
+    # 2. Question 1 start_interview failure + fallback send failure
+    caplog.clear()
+    client = _client_with_portrait()
+    client.send_message.side_effect = TelegramClientError("q1 fallback boom")
+    interviewer_q1_fail = MagicMock(spec=Interviewer)
+    interviewer_q1_fail.start_interview.side_effect = InterviewerError("q1 boom")
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_photo_update(chat_id=111, update_id=202),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer_q1_fail,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+    assert "event=interview_start_fallback_failed stage=gateway chat_id=111" in caplog.text
+
+    # 3. Mid-interview turn failure + fallback send failure
+    caplog.clear()
+    sessions.start_interview(chat_id=111, portrait=PORTRAIT_BYTES, first_question="Q1?")
+    interviewer_turn_fail = MagicMock(spec=Interviewer)
+    interviewer_turn_fail.advance_interview.side_effect = InterviewerError("turn boom")
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_text_update(chat_id=111, text="A1", update_id=203),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer_turn_fail,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+    assert "event=interview_turn_fallback_failed stage=gateway chat_id=111" in caplog.text
+
+    # 4. Converter failure + fallback send failure
+    caplog.clear()
+    dossier = BehavioralDossier(summary="Dossier.", suggested_animal="Red Panda")
+    sessions.complete_interview(chat_id=111, answer="A1", dossier=dossier)
+    with caplog.at_level(logging.ERROR):
+        process_update(
+            update=_text_update(chat_id=111, text="Retry portrait", update_id=204),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+    assert "event=converter_fallback_failed stage=gateway chat_id=111" in caplog.text
+
+
+def test_two_consecutive_full_documentary_runs_in_same_process_succeed_cleanly() -> None:
+    """Two full end-to-end documentary runs for the same chat_id succeed back-to-back."""
+    chat_id = 777
+    sessions = SessionStore()
+    bouncer = _human_bouncer()
+    created_paths: list[Path] = []
+    narrator = _ready_narrator(created_paths=created_paths)
+
+    portrait_run_1 = b"\xff\xd8portrait-run-1"
+    portrait_run_2 = b"\xff\xd8portrait-run-2"
+    hybrid_run_1 = b"\x89PNG-hybrid-1"
+    hybrid_run_2 = b"\x89PNG-hybrid-2"
+    script_run_1 = "Run one narration observing the nocturnal Eurasian Badger in the kitchen."
+    script_run_2 = "Run two narration observing the energetic Red Panda on the balcony."
+    dossier_run_1 = BehavioralDossier(
+        summary="Run 1 nocturnal kitchen badger habits.",
+        suggested_animal="Eurasian Badger",
+    )
+    dossier_run_2 = BehavioralDossier(
+        summary="Run 2 sunny balcony red panda habits.",
+        suggested_animal="Red Panda",
+    )
+
+    client = MagicMock(spec=TelegramClient)
+    client.get_file.return_value = TelegramFile(
+        file_id="large",
+        file_unique_id="u-large",
+        file_path="photos/large.jpg",
+    )
+    client.download_file.side_effect = [portrait_run_1, portrait_run_2]
+
+    interviewer = MagicMock(spec=Interviewer)
+    interviewer.start_interview.side_effect = ["Run1 Q1?", "Run2 Q1?"]
+    interviewer.advance_interview.side_effect = [
+        InterviewerTurnResult(is_complete=False, next_question="Run1 Q2?", dossier=None),
+        InterviewerTurnResult(is_complete=False, next_question="Run1 Q3?", dossier=None),
+        InterviewerTurnResult(is_complete=False, next_question="Run1 Q4?", dossier=None),
+        InterviewerTurnResult(is_complete=False, next_question="Run1 Q5?", dossier=None),
+        InterviewerTurnResult(is_complete=True, next_question="", dossier=dossier_run_1),
+        InterviewerTurnResult(is_complete=False, next_question="Run2 Q2?", dossier=None),
+        InterviewerTurnResult(is_complete=False, next_question="Run2 Q3?", dossier=None),
+        InterviewerTurnResult(is_complete=False, next_question="Run2 Q4?", dossier=None),
+        InterviewerTurnResult(is_complete=False, next_question="Run2 Q5?", dossier=None),
+        InterviewerTurnResult(is_complete=True, next_question="", dossier=dossier_run_2),
+    ]
+
+    converter = MagicMock(spec=Converter)
+    converter.generate_hybrid_portrait.side_effect = [hybrid_run_1, hybrid_run_2]
+
+    scripter = MagicMock(spec=Scripter)
+    scripter.generate_script.side_effect = [script_run_1, script_run_2]
+
+    # --- Run 1 ---
+    process_update(
+        update=_photo_update(chat_id=chat_id, update_id=1),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    assert sessions.get(chat_id).phase == SessionPhase.INTERVIEWING
+    for turn in range(1, 6):
+        process_update(
+            update=_text_update(chat_id=chat_id, text=f"Run1 Answer {turn}", update_id=1 + turn),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+
+    state_after_run_1 = sessions.get(chat_id)
+    assert state_after_run_1.phase == SessionPhase.COMPLETED
+    assert state_after_run_1.dossier == dossier_run_1
+    assert state_after_run_1.hybrid_portrait == hybrid_run_1
+    assert state_after_run_1.script == script_run_1
+    assert state_after_run_1.ephemeral_files == []
+
+    # --- /restart between runs ---
+    process_update(
+        update=_text_update(chat_id=chat_id, text="/restart", update_id=10),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    state_after_restart = sessions.get(chat_id)
+    assert state_after_restart.phase == SessionPhase.AWAITING_PHOTO
+    assert state_after_restart.portrait is None
+    assert state_after_restart.current_question is None
+    assert state_after_restart.interview_history == []
+    assert state_after_restart.dossier is None
+    assert state_after_restart.hybrid_portrait is None
+    assert state_after_restart.script is None
+    assert state_after_restart.ephemeral_files == []
+
+    # --- Run 2 ---
+    process_update(
+        update=_photo_update(chat_id=chat_id, update_id=11),
+        client=client,
+        sessions=sessions,
+        bouncer=bouncer,
+        interviewer=interviewer,
+        converter=converter,
+        scripter=scripter,
+        narrator=narrator,
+    )
+    assert sessions.get(chat_id).phase == SessionPhase.INTERVIEWING
+    assert sessions.get(chat_id).portrait == portrait_run_2
+    assert sessions.get(chat_id).interview_history == []
+
+    for turn in range(1, 6):
+        process_update(
+            update=_text_update(chat_id=chat_id, text=f"Run2 Answer {turn}", update_id=11 + turn),
+            client=client,
+            sessions=sessions,
+            bouncer=bouncer,
+            interviewer=interviewer,
+            converter=converter,
+            scripter=scripter,
+            narrator=narrator,
+        )
+
+    state_after_run_2 = sessions.get(chat_id)
+    assert state_after_run_2.phase == SessionPhase.COMPLETED
+    assert state_after_run_2.dossier == dossier_run_2
+    assert state_after_run_2.hybrid_portrait == hybrid_run_2
+    assert state_after_run_2.script == script_run_2
+    assert len(state_after_run_2.interview_history) == 5
+    assert all(
+        turn.question.startswith("Run2") and turn.answer.startswith("Run2")
+        for turn in state_after_run_2.interview_history
+    )
+    assert len(created_paths) == 2
+    assert all(not p.exists() for p in created_paths)
