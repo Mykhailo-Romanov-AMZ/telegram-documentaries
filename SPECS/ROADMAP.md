@@ -53,11 +53,12 @@ This roadmap defines the ordered build phases for **The Telegram Documentaries**
 ---
 
 ## Phase 5: The Scripter (Documentary Narration Text)
-- **Status:** Pending
+- **Status:** Completed
 - **Goal:** Implement the Scripter specialist agent (`gemini-3.1-flash-lite-preview`) that transforms the behavioral dossier into a single-paragraph (~60–90 words) dramatic British wildlife documentary script and sends it to the chat.
 - **Acceptance Criteria:**
-  - Generates a cohesive, one-paragraph nature documentary narrative (~60–90 words) matching the user's dossier and spirit animal.
-  - Sends the narrative text to the user's Telegram chat and passes it to the TTS stage.
+  - [x] Generates a cohesive, one-paragraph nature documentary narrative (~60–90 words) matching the user's dossier and spirit animal.
+  - [x] Sends the narrative text to the user's Telegram chat and passes it to subsequent stages.
+- **Delivery Summary:** Added strict Pydantic v2 boundary schema (`DocumentaryScript` with single-paragraph and markdown-cleaning validators), extended `SessionState`/`SessionStore` with `script` (`set_script`, cleared in `start_interview` and `reset`), implemented the structured-output `Scripter` agent (`gemini-3.1-flash-lite-preview`, `response_schema=DocumentaryScript`, `event=scripter_narration_generated` logging), wired sequential narration generation immediately following hybrid portrait delivery in `GENERATING_MEDIA`, and added retry resilience (`SCRIPTER_ERROR_FALLBACK_MESSAGE`) and out-of-order text handling. 208 tests pass.
 - **Rubric Alignment:** Documentary script quality, persona adherence, and pipeline integration.
 
 ---

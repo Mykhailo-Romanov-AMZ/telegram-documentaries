@@ -1,5 +1,7 @@
 """Pydantic v2 boundary schemas for Telegram Bot API and Gemini agent payloads."""
 
+import re
+
 from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 
 
@@ -230,3 +232,31 @@ class SendPhotoResponse(BaseModel):
 
     ok: StrictBool
     result: TelegramMessage
+
+
+_MARKDOWN_EMPHASIS_MARKERS = str.maketrans("", "", "*_`")
+_MARKDOWN_HEADING_PREFIX = re.compile(r"(?m)^\s*#{1,6}\s*")
+
+
+class DocumentaryScript(BaseModel):
+    """Structured output returned by the Scripter agent for documentary voiceover narration."""
+
+    narration: str = Field(
+        description=(
+            "A single dramatic, comedic British nature documentary voiceover paragraph "
+            "(roughly 60 to 90 words) observing the subject as their spirit animal in the wild. "
+            "Plain spoken prose only: no line breaks, markdown formatting, or stage directions, "
+            "so it is ready for direct voice synthesis."
+        )
+    )
+
+    @field_validator("narration")
+    @classmethod
+    def validate_single_paragraph_narration(cls, value: str) -> str:
+        """Normalise narration into plain single-paragraph prose for voice synthesis."""
+        cleaned = value.translate(_MARKDOWN_EMPHASIS_MARKERS)
+        cleaned = _MARKDOWN_HEADING_PREFIX.sub("", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            raise ValueError("DocumentaryScript narration must not be empty.")
+        return cleaned
